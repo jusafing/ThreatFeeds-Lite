@@ -23,6 +23,10 @@ vi.mock('../api/client', async () => {
       getThreatIntelCatalog: vi.fn(),
       saveThreatIntelSources: vi.fn(),
       reloadScheduler: vi.fn(),
+      // Used by useFeedStatus (issue #1 per-feed status marker). Default to
+      // empty so the card renders without a backing job/summary store.
+      listActiveJobs: vi.fn(),
+      getSummary: vi.fn(),
     },
   }
 })
@@ -60,6 +64,8 @@ beforeEach(() => {
   vi.mocked(api.reloadScheduler).mockReset()
   vi.mocked(api.saveThreatIntelSources).mockResolvedValue([])
   vi.mocked(api.reloadScheduler).mockResolvedValue({ status: 'ok' })
+  vi.mocked(api.listActiveJobs).mockResolvedValue([])
+  vi.mocked(api.getSummary).mockResolvedValue([])
 })
 
 describe('ThreatIntelCatalog', () => {

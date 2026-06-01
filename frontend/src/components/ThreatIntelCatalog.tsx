@@ -4,6 +4,8 @@ import { Save } from 'lucide-react'
 import clsx from 'clsx'
 import { api, type ThreatIntelToggle } from '../api/client'
 import Toggle from './Toggle'
+import FeedStatusMarker from './FeedStatusMarker'
+import { useFeedStatus } from '../hooks/useFeedStatus'
 
 interface RowState {
   enabled: boolean
@@ -28,6 +30,8 @@ export default function ThreatIntelCatalog() {
 
   const [draft, setDraft] = useState<Record<string, RowState>>({})
 
+  const { statusFor } = useFeedStatus()
+
   // Re-seed draft whenever the server catalogue changes.
   useEffect(() => {
     if (!catalog) return
@@ -49,6 +53,8 @@ export default function ThreatIntelCatalog() {
         qc.invalidateQueries({ queryKey: ['threat-intel-catalog'] }),
         qc.invalidateQueries({ queryKey: ['remote-json-pull'] }),
         qc.invalidateQueries({ queryKey: ['rss-pull'] }),
+        qc.invalidateQueries({ queryKey: ['active-jobs'] }),
+        qc.invalidateQueries({ queryKey: ['viewer-summary', 'feed-status'] }),
       ])
       await api.reloadScheduler().catch(() => { /* best-effort */ })
     },
@@ -131,6 +137,9 @@ export default function ThreatIntelCatalog() {
                     <span className="text-xs text-gray-500 border border-gray-700 rounded px-1.5 py-0.5 shrink-0">
                       {item.kind === 'rss_pull' ? 'RSS' : 'JSON'}
                     </span>
+                    {d.enabled && (
+                      <FeedStatusMarker status={statusFor(item.name)} className="shrink-0" />
+                    )}
                   </div>
                   <p className="text-xs text-gray-500 truncate" title={item.url}>
                     {item.url}
