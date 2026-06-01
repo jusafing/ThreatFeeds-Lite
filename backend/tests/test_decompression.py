@@ -114,6 +114,23 @@ def test_content_encoding_gzip_triggers_decompression() -> None:
     assert out == payload
 
 
+def test_content_encoding_gzip_already_decoded_passes_through() -> None:
+    # Regression (issue_local_01): httpx transparently decodes transport-level
+    # `Content-Encoding: gzip`, so the body is already plaintext when we see it.
+    # The header must NOT trigger a re-decompress / MagicMismatchError; the
+    # plaintext body must pass through unchanged so the feed actually ingests.
+    payload = json.dumps({"vulnerabilities": [{"cveID": "CVE-2024-0001"}]}).encode("utf-8")
+    assert not payload.startswith(dc.GZIP_MAGIC)
+    name, out = dc.decompress_if_needed(
+        filename="",
+        body=payload,
+        content_type="application/json",
+        content_encoding="gzip",
+    )
+    assert out == payload
+    assert name == ""
+
+
 # ── Q4: multi-member and empty zips ──────────────────────────────────────────
 def test_multi_member_zip_rejected() -> None:
     body = _zip_many([("a.json", b"{}"), ("b.json", b"[]")])
