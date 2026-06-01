@@ -1,0 +1,78 @@
+# ThreatFeeds Lite — Sources Configuration
+#
+# This file is managed by the application. You can also edit it directly.
+# Restart the ingestor after manual edits for changes to take effect.
+
+# ──────────────────────────────────────────
+# Push Listener (API endpoint — receives incoming JSON POST requests)
+# Generic endpoint: POST /api/ingest/listener
+# Any JSON object or array is indexed into a feed named after the authenticated
+# sending user, or "Received Feed <epoch>" when authentication is disabled.
+# ──────────────────────────────────────────
+listener:
+  enabled: true
+  # Fields enabled for this source (overrides global feed-fields.yaml defaults).
+  # Omit to inherit global defaults.
+  fields: {}
+
+# ──────────────────────────────────────────
+# External API Pull sources
+# ──────────────────────────────────────────
+# Each entry:
+#   name:             unique source identifier (used as DB filename)
+#   enabled:          whether this source is active
+#   url:              endpoint to pull JSON from
+#   interval_minutes: pull interval (default 15)
+#   headers:          optional HTTP headers (e.g. for auth tokens)
+#   fields:           per-source field overrides (omit to use global defaults)
+#
+api_pull: []
+# Example:
+# api_pull:
+#   - name: my_threat_feed
+#     enabled: true
+#     url: https://example.com/api/threatfeed.json
+#     interval_minutes: 15
+#     headers:
+#       Authorization: "Bearer <token>"
+#     fields: {}
+
+# ──────────────────────────────────────────
+# External RSS Pull sources
+# ──────────────────────────────────────────
+# Each entry:
+#   name:             unique source identifier (used as DB filename)
+#   enabled:          whether this source is active
+#   url:              RSS/Atom feed URL
+#   interval_minutes: pull interval (default 15)
+#   fields:           per-source field overrides (omit to use global defaults)
+#
+rss_pull: []
+# Example:
+# rss_pull:
+#   - name: us_cert_alerts
+#     enabled: true
+#     url: https://www.cisa.gov/uscert/ncas/alerts.xml
+#     interval_minutes: 30
+#     fields: {}
+
+# ──────────────────────────────────────────
+# Remote JSON Pull sources
+# ──────────────────────────────────────────
+# Each entry:
+#   name:             unique source identifier (used as DB filename)
+#   enabled:          whether this source is active
+#   url:              remote JSON or NDJSON file URL
+#   continuous:       if true, pull on a schedule; if false, manual trigger only
+#   interval_minutes: pull interval when continuous=true (default 15)
+#   fields:           per-source field overrides (omit to use global defaults)
+#
+remote_json_pull: []
+# Example:
+# remote_json_pull:
+#   - name: spamhaus_drop
+#     enabled: true
+#     url: https://example.com/drop.json
+#     continuous: true
+#     interval_minutes: 60
+#     fields: {}

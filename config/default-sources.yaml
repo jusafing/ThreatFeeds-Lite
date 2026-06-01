@@ -1,0 +1,209 @@
+# ThreatFeeds Lite — Default Open Threat Intel / Vulnerability Sources
+#
+# Curated catalogue of open threat-intelligence and vulnerability feeds offered
+# to users in the "Open Threat Intel / Vulnerability Sources" card (Remote Feed
+# tab). This file is LOADED by the application (backend/config/loader.py →
+# load_default_sources). Edit it in future releases to update the offered list;
+# the UI re-reads it on each request.
+#
+# Each entry:
+#   name:                    unique slug — becomes the sources.yaml entry name /
+#                            DB filename when the user enables the feed
+#   title:                   human-readable display name
+#   kind:                    rss_pull | remote_json_pull   (how it is ingested)
+#   url:                     verified feed endpoint
+#   info:                    one-line description shown in the UI
+#   default_interval_minutes: suggested pull interval when continuous pull is on
+#
+# Notes:
+# - Only no-auth JSON / RSS / Atom feeds are included. Auth-required feeds
+#   (e.g. AlienVault OTX) are intentionally excluded — they need per-source API
+#   keys configured via the External API tab.
+# - All feeds were live-verified (see developer_notes/threat-intel-sources-research.md).
+
+threat_intel_sources:
+  # ── Government / CERT / standards bodies ──────────────────────────────────
+  - name: cisa_advisories
+    title: "CISA — All Cybersecurity Advisories"
+    kind: rss_pull
+    url: https://www.cisa.gov/cybersecurity-advisories/all.xml
+    info: "US CISA cybersecurity advisories (RSS)."
+    default_interval_minutes: 60
+  - name: cisa_kev
+    title: "CISA — Known Exploited Vulnerabilities (KEV)"
+    kind: remote_json_pull
+    url: https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+    info: "Catalog of CVEs known to be actively exploited."
+    default_interval_minutes: 360
+  - name: nvd_cve
+    title: "NVD — CVE API 2.0"
+    kind: remote_json_pull
+    url: https://services.nvd.nist.gov/rest/json/cves/2.0
+    info: "NIST National Vulnerability Database CVE feed (JSON)."
+    default_interval_minutes: 360
+  - name: jpcert
+    title: "JPCERT/CC"
+    kind: rss_pull
+    url: https://www.jpcert.or.jp/rss/jpcert.rdf
+    info: "Japan CERT Coordination Center advisories (RSS)."
+    default_interval_minutes: 360
+  - name: cert_cc_vuln_notes
+    title: "CERT/CC — Vulnerability Notes"
+    kind: rss_pull
+    url: https://kb.cert.org/vuls/atomfeed/
+    info: "Carnegie Mellon CERT/CC vulnerability notes (Atom)."
+    default_interval_minutes: 360
+  - name: ncsc_uk
+    title: "NCSC UK"
+    kind: rss_pull
+    url: https://www.ncsc.gov.uk/api/1/services/v1/all-rss-feed.xml
+    info: "UK National Cyber Security Centre feed (RSS)."
+    default_interval_minutes: 360
+  - name: cert_eu
+    title: "CERT-EU — Security Advisories"
+    kind: rss_pull
+    url: https://cert.europa.eu/publications/security-advisories-rss
+    info: "EU institutions CERT security advisories (RSS)."
+    default_interval_minutes: 360
+  - name: cis_msisac
+    title: "CIS / MS-ISAC — Cyber Security Advisories"
+    kind: rss_pull
+    url: https://www.cisecurity.org/feed/advisories
+    info: "Center for Internet Security / MS-ISAC advisories (RSS)."
+    default_interval_minutes: 360
+  - name: first_epss
+    title: "FIRST — EPSS (Exploit Prediction Scoring System)"
+    kind: remote_json_pull
+    url: https://api.first.org/data/v1/epss
+    info: "Probability scores that a CVE will be exploited (JSON)."
+    default_interval_minutes: 720
+
+  # ── Nonprofit / community indicator trackers ──────────────────────────────
+  - name: abusech_urlhaus
+    title: "abuse.ch — URLhaus (recent URLs)"
+    kind: remote_json_pull
+    url: https://urlhaus.abuse.ch/downloads/json_recent/
+    info: "Recently submitted malware-distribution URLs (JSON)."
+    default_interval_minutes: 60
+  - name: abusech_threatfox
+    title: "abuse.ch — ThreatFox (recent IOCs)"
+    kind: remote_json_pull
+    url: https://threatfox.abuse.ch/export/json/recent/
+    info: "Recently shared indicators of compromise (JSON)."
+    default_interval_minutes: 60
+  - name: abusech_feodo
+    title: "abuse.ch — Feodo Tracker (C2 IP blocklist)"
+    kind: remote_json_pull
+    url: https://feodotracker.abuse.ch/downloads/ipblocklist.json
+    info: "Botnet command-and-control IP blocklist (JSON)."
+    default_interval_minutes: 360
+  - name: spamhaus_drop
+    title: "Spamhaus — DROP (Don't Route Or Peer)"
+    kind: remote_json_pull
+    url: https://www.spamhaus.org/drop/drop_v4.json
+    info: "Hijacked / leased netblocks blocklist (JSON/NDJSON)."
+    default_interval_minutes: 720
+  - name: spamhaus_asndrop
+    title: "Spamhaus — ASN-DROP"
+    kind: remote_json_pull
+    url: https://www.spamhaus.org/drop/asndrop.json
+    info: "Malicious autonomous-system blocklist (JSON/NDJSON)."
+    default_interval_minutes: 720
+  - name: circl_misp_osint
+    title: "CIRCL — MISP OSINT default feed"
+    kind: remote_json_pull
+    url: https://www.circl.lu/doc/misp/feed-osint/manifest.json
+    info: "CIRCL curated open-source intel MISP feed manifest (JSON)."
+    default_interval_minutes: 360
+  - name: circl_cve_search
+    title: "CIRCL — CVE-Search (last CVEs)"
+    kind: remote_json_pull
+    url: https://cve.circl.lu/api/last
+    info: "Most recently published CVEs (JSON)."
+    default_interval_minutes: 360
+  - name: sans_isc
+    title: "SANS Internet Storm Center (ISC)"
+    kind: rss_pull
+    url: https://isc.sans.edu/rssfeed.xml
+    info: "SANS ISC diaries and handler notes (RSS)."
+    default_interval_minutes: 120
+
+  # ── Established vendor / research blogs ───────────────────────────────────
+  - name: cisco_talos
+    title: "Cisco Talos Intelligence"
+    kind: rss_pull
+    url: https://blog.talosintelligence.com/rss/
+    info: "Cisco Talos threat research (RSS)."
+    default_interval_minutes: 240
+  - name: unit42
+    title: "Palo Alto Networks — Unit 42"
+    kind: rss_pull
+    url: https://unit42.paloaltonetworks.com/feed/
+    info: "Palo Alto Unit 42 threat research (RSS)."
+    default_interval_minutes: 240
+  - name: microsoft_security
+    title: "Microsoft Security Blog"
+    kind: rss_pull
+    url: https://www.microsoft.com/en-us/security/blog/feed/
+    info: "Microsoft security research and intelligence (RSS)."
+    default_interval_minutes: 240
+  - name: checkpoint_research
+    title: "Check Point Research"
+    kind: rss_pull
+    url: https://research.checkpoint.com/feed/
+    info: "Check Point threat research (RSS)."
+    default_interval_minutes: 240
+  - name: securelist
+    title: "Securelist (Kaspersky GReAT)"
+    kind: rss_pull
+    url: https://securelist.com/feed/
+    info: "Kaspersky GReAT threat research (RSS)."
+    default_interval_minutes: 240
+  - name: project_zero
+    title: "Google Project Zero"
+    kind: rss_pull
+    url: https://googleprojectzero.blogspot.com/feeds/posts/default
+    info: "Google Project Zero vulnerability research (Atom)."
+    default_interval_minutes: 360
+  - name: welivesecurity
+    title: "ESET — WeLiveSecurity"
+    kind: rss_pull
+    url: https://www.welivesecurity.com/en/rss/feed/
+    info: "ESET threat research and news (RSS)."
+    default_interval_minutes: 240
+  - name: malwarebytes_labs
+    title: "Malwarebytes Labs"
+    kind: rss_pull
+    url: https://www.malwarebytes.com/blog/feed/index.xml
+    info: "Malwarebytes threat intelligence blog (RSS)."
+    default_interval_minutes: 240
+  - name: dfir_report
+    title: "The DFIR Report"
+    kind: rss_pull
+    url: https://thedfirreport.com/feed/
+    info: "Real-world incident-response intrusion reports (RSS)."
+    default_interval_minutes: 360
+  - name: krebs_on_security
+    title: "Krebs on Security"
+    kind: rss_pull
+    url: https://krebsonsecurity.com/feed/
+    info: "Brian Krebs security journalism (RSS)."
+    default_interval_minutes: 240
+  - name: bleeping_computer
+    title: "BleepingComputer"
+    kind: rss_pull
+    url: https://www.bleepingcomputer.com/feed/
+    info: "Security and breach news (RSS)."
+    default_interval_minutes: 120
+  - name: the_hacker_news
+    title: "The Hacker News"
+    kind: rss_pull
+    url: https://feeds.feedburner.com/TheHackersNews
+    info: "Cybersecurity news (RSS)."
+    default_interval_minutes: 120
+  - name: security_affairs
+    title: "Security Affairs"
+    kind: rss_pull
+    url: https://securityaffairs.com/feed
+    info: "Pierluigi Paganini security news and research (RSS)."
+    default_interval_minutes: 120

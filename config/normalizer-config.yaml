@@ -1,0 +1,24 @@
+# ThreatFeeds Lite — Normalizer Configuration
+#
+# mode: "auto" — engine maps raw fields → canonical schema using synonym groups
+#       "manual" — operator defines explicit source→canonical field mappings here
+#
+# enabled: master toggle; when false the scheduler job is a no-op
+# interval_minutes: how often the background job runs (auto mode).
+#                   Default changed from 30 to 10 in prompts-021A so the
+#                   normalizer keeps up more responsively with fresh ingests.
+#                   Existing deployments retain their persisted value here
+#                   because the yaml value (when present) wins over defaults.
+
+mode: auto
+enabled: true
+interval_minutes: 10
+
+# manual_mappings is only used when mode == "manual".
+# Each entry maps a source name to its field mapping rules.
+# Example:
+# manual_mappings:
+#   my_source:
+#     ip_address: indicator
+#     threat_score: severity
+manual_mappings: {}

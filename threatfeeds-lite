@@ -1,0 +1,503 @@
+#!/usr/bin/env bash
+# threatfeeds-lite — start/stop the ThreatFeeds Lite
+# Usage:
+#   ./threatfeeds-lite start
+#   ./threatfeeds-lite stop
+#   ./threatfeeds-lite start --dev      (separate ports: backend :8000, frontend :5173)
+#   ./threatfeeds-lite start --bind 0.0.0.0          (listen on all interfaces, port 8000)
+#   ./threatfeeds-lite start --bind 0.0.0.0:9000     (all interfaces, custom port; syntax ip:port)
+#   ./threatfeeds-lite start --bind :9000            (default address 127.0.0.1, custom port)
+#   ./threatfeeds-lite start --base-prefix /feeds   (override yaml; empty string = root)
+#   ./threatfeeds-lite start --enable-auth          (force-enable login for this run)
+#   ./threatfeeds-lite --reset-db
+#   ./threatfeeds-lite --reset-source <SOURCE_NAME>
+#   ./threatfeeds-lite --reset-admin-password
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PID_DIR="${SCRIPT_DIR}/.pids"
+BACKEND_PID_FILE="${PID_DIR}/backend.pid"
+FRONTEND_PID_FILE="${PID_DIR}/frontend.pid"
+BACKEND_PORT_FILE="${PID_DIR}/backend.port"
+BACKEND_LOG="${SCRIPT_DIR}/backend.log"
+FRONTEND_LOG="${SCRIPT_DIR}/frontend.log"
+BACKEND_PORT=8000
+FRONTEND_PORT=8080
+VITE_DEV_PORT=5173
+FRONTEND_DIR="${SCRIPT_DIR}/frontend"
+BACKEND_DIR="${SCRIPT_DIR}/backend"
+VENV_DIR="${SCRIPT_DIR}/.venv"
+UV=""  # populated by require_uv()
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+log()  { echo "[threatfeeds-lite] $*"; }
+err()  { echo "[threatfeeds-lite] ERROR: $*" >&2; }
+die()  { err "$*"; exit 1; }
+
+# Detect uv; set UV variable (empty string if not found)
+require_uv() {
+    if command -v uv &>/dev/null; then
+        UV="$(command -v uv)"
+        log "Using uv $(${UV} --version 2>/dev/null | head -1 | awk '{print $2}') for dependency management."
+    else
+        UV=""
+        log "WARNING: 'uv' not found — falling back to python3 + pip."
+        log "  Install uv (recommended): curl -LsSf https://astral.sh/uv/install.sh | sh"
+    fi
+}
+
+require_python() {
+    if [ -x "${VENV_DIR}/bin/python" ]; then
+        PYTHON="${VENV_DIR}/bin/python"
+        PIP="${VENV_DIR}/bin/pip"
+    elif command -v python3 &>/dev/null; then
+        PYTHON="python3"
+        PIP="pip3"
+    else
+        die "Python 3 not found. Please install Python 3.10+."
+    fi
+}
+
+require_node() {
+    command -v node &>/dev/null || die "Node.js not found. Please install Node.js 18+."
+    command -v npm  &>/dev/null || die "npm not found."
+}
+
+setup_venv() {
+    if [ -n "${UV}" ]; then
+        # ── uv path (preferred) ────────────────────────────────────────────
+        log "Creating/verifying virtual environment with uv..."
+        "${UV}" venv "${VENV_DIR}" --allow-existing --quiet
+
+        log "Installing all dependencies from requirements.txt with uv..."
+        "${UV}" pip install \
+            --quiet \
+            --python "${VENV_DIR}/bin/python" \
+            -r "${BACKEND_DIR}/requirements.txt"
+    else
+        # ── pip fallback (no uv installed) ────────────────────────────────
+        if [ ! -d "${VENV_DIR}" ]; then
+            log "Creating Python virtual environment..."
+            python3 -m venv "${VENV_DIR}"
+        fi
+        log "Installing/updating dependencies with pip..."
+        "${VENV_DIR}/bin/pip" install -q -r "${BACKEND_DIR}/requirements.txt"
+    fi
+
+    # Always point PYTHON/PIP at the venv after setup
+    PYTHON="${VENV_DIR}/bin/python"
+    PIP="${VENV_DIR}/bin/pip"
+}
+
+is_running() {
+    local pid_file="$1"
+    [ -f "${pid_file}" ] && kill -0 "$(cat "${pid_file}")" 2>/dev/null
+}
+
+is_port_listening() {
+    local port="$1"
+    if command -v ss &>/dev/null; then
+        ss -lntp 2>/dev/null | grep -q ":${port} "
+    elif command -v lsof &>/dev/null; then
+        lsof -iTCP:"${port}" -sTCP:LISTEN -t &>/dev/null
+    elif command -v netstat &>/dev/null; then
+        netstat -lnt 2>/dev/null | grep -q ":${port} "
+    else
+        # bash /dev/tcp fallback — tries to connect; succeeds if something is listening
+        (echo >/dev/tcp/127.0.0.1/"${port}") 2>/dev/null
+    fi
+}
+
+# Read the backend port persisted by the last `start`. Falls back to the
+# default (8000) when no port file exists — keeps stop/status correct even
+# when the server was started on a custom --bind port.
+current_backend_port() {
+    if [ -f "${BACKEND_PORT_FILE}" ]; then
+        cat "${BACKEND_PORT_FILE}"
+    else
+        echo "${BACKEND_PORT}"
+    fi
+}
+
+stop_process() {
+    local pid_file="$1"
+    local name="$2"
+    if is_running "${pid_file}"; then
+        local pid
+        pid=$(cat "${pid_file}")
+        log "Stopping ${name} (PID ${pid})..."
+        # Kill the entire process group (catches node children, vite workers, etc.)
+        kill -- "-${pid}" 2>/dev/null || kill "${pid}" 2>/dev/null || true
+        # Wait up to 5 s for the process to exit cleanly
+        local waited=0
+        while kill -0 "${pid}" 2>/dev/null && [ "${waited}" -lt 10 ]; do
+            sleep 0.5
+            waited=$((waited + 1))
+        done
+        # Force-kill if still alive
+        if kill -0 "${pid}" 2>/dev/null; then
+            log "${name} did not exit cleanly — sending SIGKILL..."
+            kill -9 -- "-${pid}" 2>/dev/null || kill -9 "${pid}" 2>/dev/null || true
+        fi
+        rm -f "${pid_file}"
+        log "${name} stopped."
+    else
+        log "${name} is not running."
+        rm -f "${pid_file}"
+    fi
+}
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+cmd_start() {
+    local dev_mode=false
+    local bind_addr="127.0.0.1"
+    local cli_base_prefix=""
+    local cli_base_prefix_set=false
+    local cli_enable_auth_set=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dev)   dev_mode=true ;;
+            --bind)
+                shift
+                local bind_value="${1:?'--bind requires an address (ip, ip:port, or :port)'}"
+                # Accept "ip:port" or bare "ip". A bare value (no single
+                # trailing :<digits>) is treated as a host with the default
+                # port, so existing IPv4/hostname/IPv6 literals keep working.
+                if [[ "${bind_value}" =~ ^(.*):([0-9]+)$ ]]; then
+                    local parsed_host="${BASH_REMATCH[1]}"
+                    local parsed_port="${BASH_REMATCH[2]}"
+                    # Empty host (":9000") keeps the default bind address.
+                    [ -n "${parsed_host}" ] && bind_addr="${parsed_host}"
+                    if [ "${parsed_port}" -lt 1 ] || [ "${parsed_port}" -gt 65535 ]; then
+                        die "--bind port must be between 1 and 65535 (got: '${parsed_port}')"
+                    fi
+                    BACKEND_PORT="${parsed_port}"
+                else
+                    bind_addr="${bind_value}"
+                fi
+                ;;
+            --enable-auth)
+                # Boolean opt-in. Forces SIMPLE_FEED_ENABLE_AUTH=1 for this run,
+                # which the backend reads with precedence over application.yaml.
+                cli_enable_auth_set=true
+                ;;
+            --base-prefix)
+                shift
+                # Allow explicit empty string ("" / '') to mean "mount at root".
+                # ${1?...} (no colon) errors only if $1 is UNSET, not if empty.
+                cli_base_prefix="${1?'--base-prefix requires a value (use \"\" for root)'}"
+                cli_base_prefix_set=true
+                # Light client-side validation; backend re-validates and will
+                # fall back to yaml + log warn on truly invalid values.
+                if [ -n "${cli_base_prefix}" ]; then
+                    [[ "${cli_base_prefix}" == /* ]] \
+                        || die "--base-prefix must start with '/' (got: '${cli_base_prefix}')"
+                    [[ "${cli_base_prefix}" != */ ]] \
+                        || die "--base-prefix must not end with '/' (got: '${cli_base_prefix}')"
+                    [[ "${cli_base_prefix}" != *//* ]] \
+                        || die "--base-prefix must not contain '//' (got: '${cli_base_prefix}')"
+                fi
+                ;;
+            *)       die "Unknown option: $1" ;;
+        esac
+        shift
+    done
+
+    mkdir -p "${PID_DIR}"
+    # Persist the chosen port so a later stop/status (which never see --bind)
+    # target the right port.
+    echo "${BACKEND_PORT}" > "${BACKEND_PORT_FILE}"
+    require_uv
+    require_node
+
+    # Stop any existing processes first
+    is_running "${BACKEND_PID_FILE}"  && stop_process "${BACKEND_PID_FILE}"  "backend"
+    is_running "${FRONTEND_PID_FILE}" && stop_process "${FRONTEND_PID_FILE}" "frontend"
+
+    # Setup backend venv
+    setup_venv
+
+    # Build the env-var override array for uvicorn. Empty when the flag was
+    # not passed, so the backend reads application.yaml as usual.
+    local env_overrides=()
+    if [ "${cli_base_prefix_set}" = true ]; then
+        env_overrides+=("SIMPLE_FEED_BASE_PREFIX=${cli_base_prefix}")
+        log "Base URL prefix override: '${cli_base_prefix:-<root>}' (SIMPLE_FEED_BASE_PREFIX)"
+    fi
+    if [ "${cli_enable_auth_set}" = true ]; then
+        env_overrides+=("SIMPLE_FEED_ENABLE_AUTH=1")
+        log "Authentication override: ENABLED (SIMPLE_FEED_ENABLE_AUTH=1)"
+    fi
+
+    # ── First-run admin credential (prompts-059) ──────────────────────────────
+    # Provision the admin account BEFORE launching uvicorn so that, on a genuine
+    # first run, the generated credential can be shown in this (foreground)
+    # terminal and the operator can acknowledge it before the app starts.
+    # bootstrap_admin_if_empty() is idempotent: it returns the password only on
+    # the first run and None thereafter, so the in-process lifespan call in
+    # backend/main.py then no-ops (no double generation). Runs only when auth is
+    # enabled, mirroring backend/main.py's gate. Note: this prints the password
+    # to the operator's terminal (an explicit, interactive action) — it is NOT
+    # written to backend.log, so the secret stays off the application log.
+    local first_run_rc=0
+    env ${env_overrides[@]+"${env_overrides[@]}"} PYTHONPATH="${SCRIPT_DIR}" "${VENV_DIR}/bin/python" -c "
+import asyncio, sys
+from backend.config.loader import load_auth_enabled
+from backend.auth.db import init_users_db
+from backend.auth.service import bootstrap_admin_if_empty, format_credential_box
+
+async def _main():
+    if not load_auth_enabled():
+        return 0
+    await init_users_db()
+    pw = await bootstrap_admin_if_empty()
+    if pw is None:
+        return 0
+    print()
+    print(format_credential_box('admin', pw))
+    return 10
+
+sys.exit(asyncio.run(_main()))
+" || first_run_rc=$?
+    if [ "${first_run_rc}" -eq 10 ]; then
+        echo
+        echo "  Save these admin credentials now — they will NOT be shown again here."
+        echo "  (Also written to data/first-run-admin-credentials.txt, mode 0600.)"
+        if [ -t 0 ]; then
+            read -n 1 -s -r -p "  Press any key to launch ThreatFeeds Lite..."
+            echo
+        else
+            log "Non-interactive shell — continuing launch without a keypress pause."
+        fi
+    fi
+
+    # ── Dev mode: build frontend, run uvicorn in foreground ───────────────────
+    if [ "${dev_mode}" = true ]; then
+        log "DEV mode: frontend built and served; uvicorn runs in foreground (Ctrl+C to stop)"
+        log "Building frontend..."
+        if [ ! -d "${FRONTEND_DIR}/node_modules" ]; then
+            log "Installing frontend dependencies..."
+            npm --prefix "${FRONTEND_DIR}" install
+        fi
+        local git_commit
+        git_commit="$(git -C "${SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+        GIT_COMMIT="${git_commit}" npm --prefix "${FRONTEND_DIR}" run build
+
+        log ""
+        log "ThreatFeeds Lite is running (dev — foreground)."
+        log "  Frontend    : http://${bind_addr}:${BACKEND_PORT}${cli_base_prefix}"
+        log "  Backend API : http://${bind_addr}:${BACKEND_PORT}${cli_base_prefix}/api"
+        log "  API Docs    : http://${bind_addr}:${BACKEND_PORT}${cli_base_prefix}/docs"
+        log ""
+        cd "${SCRIPT_DIR}"
+        # No & — blocks here; logs stream to terminal; Ctrl+C to stop
+        env ${env_overrides[@]+"${env_overrides[@]}"} PYTHONPATH="${SCRIPT_DIR}" "${VENV_DIR}/bin/uvicorn" backend.main:app \
+            --host "${bind_addr}" \
+            --port "${BACKEND_PORT}" \
+            --log-level info
+        exit 0
+    fi
+
+    # ── Production mode: build frontend, run uvicorn backgrounded ────────────
+    log "Starting backend on ${bind_addr}:${BACKEND_PORT}..."
+    cd "${SCRIPT_DIR}"
+    # setsid puts uvicorn in its own process group (PGID = PID) so
+    # "kill -- -<pid>" reliably kills all its children on stop.
+    setsid env ${env_overrides[@]+"${env_overrides[@]}"} PYTHONPATH="${SCRIPT_DIR}" "${VENV_DIR}/bin/uvicorn" backend.main:app \
+        --host "${bind_addr}" \
+        --port "${BACKEND_PORT}" \
+        --log-level info \
+        > "${BACKEND_LOG}" 2>&1 &
+    echo $! > "${BACKEND_PID_FILE}"
+
+    # Wait up to 5 s for uvicorn to actually bind the port before declaring success
+    local waited=0
+    while ! is_port_listening "${BACKEND_PORT}" && [ "${waited}" -lt 10 ]; do
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+    if ! is_port_listening "${BACKEND_PORT}"; then
+        err "Backend failed to start — check ${BACKEND_LOG}"
+        exit 1
+    fi
+    log "Backend started (PID $(cat "${BACKEND_PID_FILE}")) → http://${bind_addr}:${BACKEND_PORT}${cli_base_prefix}"
+    log "API docs → http://${bind_addr}:${BACKEND_PORT}${cli_base_prefix}/docs"
+
+    log "Building frontend..."
+    if [ ! -d "${FRONTEND_DIR}/node_modules" ]; then
+        log "Installing frontend dependencies..."
+        npm --prefix "${FRONTEND_DIR}" install
+    fi
+    local git_commit
+    git_commit="$(git -C "${SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+    GIT_COMMIT="${git_commit}" npm --prefix "${FRONTEND_DIR}" run build
+    log "Frontend served by backend static files → http://${bind_addr}:${BACKEND_PORT}${cli_base_prefix}"
+    log "  (Re-run with --dev to stream logs to terminal)"
+
+    log ""
+    log "ThreatFeeds Lite is running."
+    log "  Backend API : http://${bind_addr}:${BACKEND_PORT}${cli_base_prefix}/api"
+    log "  API Docs    : http://${bind_addr}:${BACKEND_PORT}${cli_base_prefix}/docs"
+    log "  Frontend    : http://${bind_addr}:${BACKEND_PORT}${cli_base_prefix}"
+    log ""
+    log "Stop with: ./threatfeeds-lite stop"
+}
+
+cmd_stop() {
+    local backend_port
+    backend_port="$(current_backend_port)"
+    stop_process "${BACKEND_PID_FILE}"  "backend"
+    stop_process "${FRONTEND_PID_FILE}" "frontend"
+
+    # Safety net: if anything still holds the backend port, kill it by PID
+    if is_port_listening "${backend_port}"; then
+        log "Port ${backend_port} still in use — attempting cleanup by port..."
+        local orphan_pid=""
+        if command -v ss &>/dev/null; then
+            orphan_pid=$(ss -lntp 2>/dev/null \
+                | grep ":${backend_port} " \
+                | grep -oP 'pid=\K[0-9]+' \
+                | head -1 || true)
+        elif command -v lsof &>/dev/null; then
+            orphan_pid=$(lsof -iTCP:"${backend_port}" -sTCP:LISTEN -t 2>/dev/null \
+                | head -1 || true)
+        fi
+        if [ -n "${orphan_pid}" ]; then
+            log "Killing orphan process ${orphan_pid} on port ${backend_port}..."
+            kill -- "-${orphan_pid}" 2>/dev/null || kill "${orphan_pid}" 2>/dev/null || true
+        else
+            log "Could not identify process on port ${backend_port} — may need manual cleanup."
+        fi
+    fi
+
+    rm -f "${BACKEND_PORT_FILE}"
+    log "All processes stopped."
+}
+
+cmd_reset_db() {
+    log "Resetting all databases..."
+    require_uv
+    setup_venv
+    cd "${SCRIPT_DIR}"
+    PYTHONPATH="${SCRIPT_DIR}" "${PYTHON}" -c "
+from backend.db.manager import reset_db
+deleted = reset_db()
+print(f'Deleted: {deleted}')
+"
+    log "All databases reset."
+}
+
+cmd_reset_source() {
+    local source_name="${1:-}"
+    [ -z "${source_name}" ] && die "Usage: ./threatfeeds-lite --reset-source <SOURCE_NAME>"
+    log "Resetting database for source '${source_name}'..."
+    require_uv
+    setup_venv
+    cd "${SCRIPT_DIR}"
+    PYTHONPATH="${SCRIPT_DIR}" "${PYTHON}" -c "
+from backend.db.manager import reset_db
+deleted = reset_db('${source_name}')
+if deleted:
+    print(f'Deleted: {deleted}')
+else:
+    print('No database found for source: ${source_name}')
+"
+    log "Done."
+}
+
+cmd_reset_admin_password() {
+    log "Resetting admin password..."
+    require_uv
+    setup_venv
+    cd "${SCRIPT_DIR}"
+    # Runs and exits — does NOT start the server. Resets (or provisions) the
+    # 'admin' account with a fresh random password, flags it must-change, and
+    # writes it to data/first-run-admin-credentials.txt (mode 0600). The new
+    # password is printed below for the operator; it is NOT written to any log.
+    PYTHONPATH="${SCRIPT_DIR}" "${PYTHON}" -c "
+import asyncio
+from backend.auth.service import (
+    reset_admin_password,
+    format_credential_box,
+    _CREDENTIAL_FILE,
+)
+pw = asyncio.run(reset_admin_password('admin'))
+print()
+print(format_credential_box('admin', pw, context='reset'))
+print()
+print('  Also written to: ' + str(_CREDENTIAL_FILE) + ' (mode 0600)')
+"
+    log "Admin password reset. The application was NOT started."
+}
+
+cmd_status() {
+    local backend_port
+    backend_port="$(current_backend_port)"
+    if is_running "${BACKEND_PID_FILE}"; then
+        log "backend  : RUNNING (PID $(cat "${BACKEND_PID_FILE}"), port ${backend_port} open)"
+    elif is_port_listening "${backend_port}"; then
+        log "backend  : RUNNING (port ${backend_port} open, PID file stale or missing)"
+    else
+        log "backend  : STOPPED"
+    fi
+
+    if is_running "${FRONTEND_PID_FILE}"; then
+        log "frontend : RUNNING (PID $(cat "${FRONTEND_PID_FILE}"), port ${VITE_DEV_PORT} open)"
+    else
+        log "frontend : STOPPED (production mode — served by backend)"
+    fi
+}
+
+# ── Entrypoint ────────────────────────────────────────────────────────────────
+
+CMD="${1:-help}"
+shift || true
+
+case "${CMD}" in
+    start)          cmd_start "$@" ;;
+    stop)           cmd_stop ;;
+    restart)        cmd_stop; cmd_start "$@" ;;
+    status)         cmd_status ;;
+    --reset-db)     cmd_reset_db ;;
+    --reset-source) cmd_reset_source "$@" ;;
+    --reset-admin-password) cmd_reset_admin_password ;;
+    help|--help|-h)
+        echo "Usage: ./threatfeeds-lite <command> [options]"
+        echo ""
+        echo "Commands:"
+        echo "  start [--dev] [--bind <ip[:port]>] [--base-prefix <value>] [--enable-auth]"
+        echo "                               Start the service"
+        echo "                               --dev: run uvicorn in foreground (logs to terminal)"
+        echo "                               Default bind address: 127.0.0.1:8000 (localhost only)"
+        echo "                               --bind takes ip, ip:port, or :port. If no port is"
+        echo "                               given the default 8000 is used. Examples:"
+        echo "                                 --bind 0.0.0.0        all interfaces, port 8000"
+        echo "                                 --bind 0.0.0.0:9000   all interfaces, port 9000"
+        echo "                                 --bind :9000          127.0.0.1, port 9000"
+        echo "                               --base-prefix overrides config/application.yaml for"
+        echo "                               this run only via the SIMPLE_FEED_BASE_PREFIX env var."
+        echo "                               Must start with '/', must not end with '/', must not"
+        echo "                               contain '//'. Use \"\" (empty string) to mount at root."
+        echo "                               --enable-auth force-enables authentication for this"
+        echo "                               run via SIMPLE_FEED_ENABLE_AUTH=1 (overrides yaml)."
+        echo "  stop                         Stop all running processes"
+        echo "  restart [--dev] [--bind <ip[:port]>] [--base-prefix <value>] [--enable-auth]"
+        echo "                               Stop then start (flags forwarded to start)"
+        echo "  status                       Show running process status"
+        echo "  --reset-db                   Delete and recreate all source databases"
+        echo "  --reset-source <NAME>        Delete and recreate a single source database"
+        echo "  --reset-admin-password       Reset the admin password to a new random value,"
+        echo "                               print it, and write it to the 0600 credential file"
+        echo "                               (data/first-run-admin-credentials.txt). Forces a"
+        echo "                               password change on next admin login. Does NOT start"
+        echo "                               the server."
+        ;;
+    *)
+        err "Unknown command: ${CMD}"
+        echo "Run './threatfeeds-lite help' for usage."
+        exit 1
+        ;;
+esac

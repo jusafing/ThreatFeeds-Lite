@@ -1,0 +1,128 @@
+# ThreatFeeds Lite — Application Configuration
+#
+# Application-wide settings unrelated to ingestion sources or fields.
+#
+# app_base_prefix: URL prefix at which the application is mounted when
+#                  served behind a reverse proxy. Affects:
+#                    - FastAPI root_path (so OpenAPI/docs URLs reflect it),
+#                    - the basename of the React Router (frontend),
+#                    - the BASE used by the in-browser API client.
+#
+#                  Format rules:
+#                    - Empty string ("") means mounted at root, no prefix.
+#                    - If non-empty, must START with '/' and must NOT end with '/'.
+#                    - Allowed characters: A-Z a-z 0-9 . _ - /
+#                    - Length up to 200.
+#                    - No scheme, no host, no query string, no spaces.
+#
+#                  Examples:
+#                    app_base_prefix: ""           # served at https://host/
+#                    app_base_prefix: "/feeds"     # served at https://host/feeds/
+#                    app_base_prefix: "/intel/v1"  # served at https://host/intel/v1/
+#
+#                  Changing this value requires a backend restart
+#                  (./threatfeeds-lite restart) to take effect.
+#
+#                  Contract (prompts-019): when EMPTY, the application emits
+#                  only document-relative URLs (assets, API fetches, and
+#                  router-generated <a href> values). A non-empty prefix is
+#                  a *forcing* override for environments where document-
+#                  relative URLs cannot be used.
+#
+#                  The CLI flag `./threatfeeds-lite start --base-prefix`
+#                  overrides this value for one run via the
+#                  SIMPLE_FEED_BASE_PREFIX env var (see prompts-018).
+#
+#                  Auto-detect (prompts-020): when EMPTY, the frontend
+#                  ALSO infers a prefix at runtime from window.location
+#                  (zero-config reverse-proxy alias support). The common
+#                  nginx-alias case (location /feeds/ → backend root) now
+#                  works without setting this value. Set this explicitly
+#                  only when you need to PIN a specific prefix (forcing
+#                  override) — e.g. unusual proxy chains, deep-link URL
+#                  shapes that don't end in a known SPA route, or to
+#                  avoid auto-detection ambiguity.
+#
+# max_decompressed_bytes: upper bound (in BYTES) for the decompressed
+#                  size of an uploaded or remotely-fetched .gz / .zip
+#                  feed payload (prompts-021B). Payloads whose
+#                  decompressed size exceeds this cap are rejected
+#                  with a clear error rather than processed, protecting
+#                  the host from zip-bomb-style attacks and runaway
+#                  memory use.
+#
+#                  Default 104857600 (100 MiB). Floor is 1024 bytes
+#                  (values below are coerced up with a warning).
+#                  Applies to both local uploads and remote pulls.
+#                  Supported wrappers: gzip (single-layer) and zip
+#                  (exactly one member; empty and multi-member zips
+#                  are rejected). 7z is intentionally not supported.
+#
+# auth_enabled:    whether the login / session / role layer is active
+#                  (prompts-045). Default false — when disabled the app is
+#                  fully open (no login screen, every API route public) so
+#                  local / trusted-network use needs zero configuration.
+#
+#                  When true:
+#                    - the SPA shows a login screen and gates all routes,
+#                    - API requests require a valid session cookie,
+#                    - the role layer applies (admin vs normal — normal users
+#                      get a read-mostly GET allowlist, no admin tooling),
+#                    - Account and User Management config tabs appear.
+#
+#                  Precedence: the SIMPLE_FEED_ENABLE_AUTH environment
+#                  variable (truthy = on) overrides this yaml value. The CLI
+#                  flag `./threatfeeds-lite start --enable-auth` sets that
+#                  env var for one run. Changing the yaml value requires a
+#                  backend restart to take effect.
+#
+#                  On first start with auth enabled and no users present, a
+#                  default admin account is provisioned. The generated password
+#                  is written to data/first-run-admin-credentials.txt (mode
+#                  0600, git-ignored); the startup log records only that path,
+#                  never the secret. Change the password immediately via the
+#                  Account tab, then delete the file.
+#
+# cookie_secure:   override for the session cookie's Secure attribute
+#                  (prompts-045). Default "auto": Secure is set when the request
+#                  is HTTPS or X-Forwarded-Proto=https. Behind a TLS-terminating
+#                  proxy that header is the only (spoofable) signal, so set this
+#                  to true in production to always mark the cookie Secure, or
+#                  false to never. The SIMPLE_FEED_COOKIE_SECURE env var
+#                  (true/false/auto) overrides this yaml value.
+#
+# logo_path:       project-relative path of the operator-uploaded branding
+#                  logo (prompts-045), or "" to use the built-in default icon.
+#                  Managed through the Application config tab (upload / remove);
+#                  you normally do not edit this by hand.
+#
+#                  Constraints (enforced on save):
+#                    - must be relative (no leading '/') and contain no '..',
+#                    - must live under data/branding/,
+#                    - the image itself must be PNG, JPEG, WebP, or GIF,
+#                      at most 2 MiB. SVG is rejected (stored-XSS risk).
+#                  GET /api/app/logo serves the image publicly (it is shown on
+#                  the unauthenticated login screen) with nosniff + no-cache.
+#
+# password_min_length:       minimum length (in characters) for new passwords
+#                  (prompts-046). Default 8. Clamped to the range [8, 64]; a
+#                  value below 8 never weakens the policy below the floor. The
+#                  ceiling is 64 (not the 72-byte bcrypt cap) so a minimum-length
+#                  password always has byte headroom for multi-byte characters.
+#                  Applies to account creation, self-service password change, and
+#                  admin password reset. Login passwords are NOT re-validated
+#                  (legacy passwords keep working).
+#
+# password_required_classes: how many of the four character classes a new
+#                  password must contain (prompts-046): lowercase, uppercase,
+#                  number, symbol. Default 3. Clamped to the range [1, 4]. The
+#                  policy is published (non-sensitive) via GET /api/auth/status
+#                  so the SPA mirrors the same rule client-side.
+
+app_base_prefix: ""
+max_decompressed_bytes: 104857600
+auth_enabled: false
+logo_path: ""
+cookie_secure: auto
+password_min_length: 8
+password_required_classes: 3

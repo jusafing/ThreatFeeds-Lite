@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NormalizedEntry",
+  "description": "Canonical schema for a normalized threat intel entry",
+  "type": "object",
+  "properties": {
+    "id":               { "type": "integer" },
+    "source_entry_id":  { "type": "integer", "description": "FK to raw entries.id" },
+    "source_name":      { "type": "string" },
+    "ip_address":       { "type": ["string", "null"] },
+    "domain":           { "type": ["string", "null"] },
+    "hash":             { "type": ["string", "null"] },
+    "severity":         { "type": ["string", "null"] },
+    "timestamp":        { "type": ["string", "null"] },
+    "source_name_norm": { "type": ["string", "null"] },
+    "actor":            { "type": ["string", "null"] },
+    "cve":              { "type": ["string", "null"] },
+    "port":             { "type": ["integer", "null"] },
+    "country":          { "type": ["string", "null"] },
+    "extra_norm":       { "type": ["string", "null"], "description": "JSON blob for unmapped fields" },
+    "normalized_at":    { "type": "string", "format": "date-time" }
+  },
+  "required": ["source_entry_id", "source_name", "normalized_at"]
+}

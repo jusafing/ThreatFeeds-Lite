@@ -1,0 +1,99 @@
+developer_notes/*
+
+# ──────────────────────────────────────────
+# OS / Editor
+# ──────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ──────────────────────────────────────────
+# Secrets / Environment
+# ──────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+# LLM provider config holds API keys; real file is generated at runtime,
+# only the .example template is committed (prompts-021D).
+config/llm-providers.yaml
+
+# ──────────────────────────────────────────
+# Python
+# ──────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+.env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ──────────────────────────────────────────
+# Node.js / TypeScript
+# ──────────────────────────────────────────
+node_modules/
+*.tsbuildinfo
+*.js.map
+*.d.ts.map
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.yarn/cache
+.yarn/unplugged
+.next/
+.nuxt/
+
+# ──────────────────────────────────────────
+# Build outputs (Python + Node shared)
+# ──────────────────────────────────────────
+dist/
+build/
+
+# ──────────────────────────────────────────
+# Application data (SQLite databases)
+# ──────────────────────────────────────────
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# First-run admin credential file (prompts-045) — secret, never commit
+data/first-run-admin-credentials.txt
+
+# ──────────────────────────────────────────
+# Application logs
+# ──────────────────────────────────────────
+logs/*.log
+logs/*.log.*
+backend.log
+
+# ──────────────────────────────────────────
+# Core dumps (prompts-021G)
+# ──────────────────────────────────────────
+core
+core.*
+
+# ──────────────────────────────────────────
+# Runtime PID / port state (machine-local, prompts-050)
+# ──────────────────────────────────────────
+.pids/
+
+# ──────────────────────────────────────────
+# Development history bundle (agent/dev notes — not part of the release)
+# Untracked: kept locally so maintainers can optionally archive it.
+# ──────────────────────────────────────────
+development_history/

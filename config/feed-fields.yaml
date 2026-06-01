@@ -1,0 +1,159 @@
+# ThreatFeeds Lite — Field Configuration
+#
+# ingest_all_fields: when true, ALL fields in the incoming record are stored
+#                    (normaliser bypass). When false, only enabled core+custom
+#                    fields are kept. Default: false.
+#
+# core_fields: built-in Threat Intel fields. Each field can be enabled/disabled
+#              per source in sources.yaml. These cannot be deleted, only toggled.
+#
+
+ingest_all_fields: true
+# flatten_max_depth: depth limit (1-10) applied when flattening nested JSON
+#                    feed records (e.g. NVD CVE objects). Beyond this depth
+#                    values are JSON-serialised into a single field.
+#                    Default: 5.
+flatten_max_depth: 5
+# custom_fields: user-defined additional fields. Can be added/edited/deleted
+#                via the UI or directly in this file.
+#
+# Field schema:
+#   name:        internal key used for DB column and API responses (snake_case)
+#   description: human-readable label shown in the UI
+#   enabled:     whether this field is active by default (can be overridden per source)
+
+core_fields:
+  - name: indicator
+    description: "Raw indicator value (IP, domain, hash, URL, CVE ID, email, file path, etc.)"
+    enabled: true
+
+  - name: indicator_type
+    description: "Indicator type: ip, domain, url, hash_md5, hash_sha1, hash_sha256, cve, email, file"
+    enabled: true
+
+  - name: threat_type
+    description: "Threat category: malware, phishing, ransomware, apt, vulnerability, exploit, other"
+    enabled: true
+
+  - name: severity
+    description: "Severity level: critical, high, medium, low, info"
+    enabled: true
+
+  - name: confidence
+    description: "Confidence score 0–100 indicating reliability of the intelligence"
+    enabled: true
+
+  - name: source
+    description: "Name of the feed or source that provided this entry"
+    enabled: true
+
+  - name: source_url
+    description: "Origin URL of the record (link to the original report or feed item)"
+    enabled: true
+
+  - name: title
+    description: "Short title or name of the threat intel entry"
+    enabled: true
+
+  - name: description
+    description: "Full description or summary of the entry"
+    enabled: true
+
+  - name: tags
+    description: "Comma-separated tags or labels associated with the entry"
+    enabled: true
+
+  - name: tlp
+    description: "Traffic Light Protocol classification: red, amber, green, white"
+    enabled: true
+
+  - name: published_at
+    description: "Original publication timestamp (ISO 8601) from the source"
+    enabled: true
+
+  - name: first_seen
+    description: "Timestamp when the indicator was first observed"
+    enabled: true
+
+  - name: last_seen
+    description: "Timestamp when the indicator was most recently observed"
+    enabled: true
+
+  - name: cve_id
+    description: "CVE identifier (e.g. CVE-2024-1234) for vulnerability entries"
+    enabled: true
+
+  - name: cvss_score
+    description: "CVSS base score (float 0.0–10.0)"
+    enabled: true
+
+  - name: cvss_vector
+    description: "CVSS vector string (e.g. CVSS:3.1/AV:N/AC:L/...)"
+    enabled: true
+
+  - name: affected_product
+    description: "Product or software affected by the vulnerability"
+    enabled: true
+
+  - name: affected_vendor
+    description: "Vendor of the affected product"
+    enabled: true
+
+  - name: patch_available
+    description: "Boolean indicating whether a patch or fix is available"
+    enabled: true
+
+  - name: mitre_attack_id
+    description: "MITRE ATT&CK technique identifier (e.g. T1059, T1566.001)"
+    enabled: true
+
+  - name: malware_family
+    description: "Malware family or variant name (e.g. Emotet, Cobalt Strike)"
+    enabled: true
+
+  - name: campaign
+    description: "Associated threat campaign name or identifier"
+    enabled: true
+
+  - name: actor
+    description: "Threat actor or group attributed to this entry (e.g. APT28)"
+    enabled: true
+
+  - name: country
+    description: "Country of origin or attribution (ISO 3166-1 alpha-2, e.g. RU, CN)"
+    enabled: true
+
+  - name: autonomous_system
+    description: "Autonomous System number or name associated with the indicator"
+    enabled: false
+
+  - name: port
+    description: "Network port number associated with the indicator"
+    enabled: false
+
+  - name: protocol
+    description: "Network protocol (tcp, udp, http, https, etc.)"
+    enabled: false
+
+  - name: geo_lat
+    description: "Geographic latitude of the indicator origin (float)"
+    enabled: false
+
+  - name: geo_lon
+    description: "Geographic longitude of the indicator origin (float)"
+    enabled: false
+
+  - name: ingest_mode
+    description: "How this entry was ingested: push, api_pull, rss_pull, local_json, remote_json"
+    enabled: true
+
+  - name: ingested_at
+    description: "Timestamp when the entry was ingested into the local database (auto-set)"
+    enabled: true
+
+  - name: raw
+    description: "Raw original payload stored as a JSON string for reference"
+    enabled: false
+
+# User-defined custom fields — add entries here or via the UI
+custom_fields: []

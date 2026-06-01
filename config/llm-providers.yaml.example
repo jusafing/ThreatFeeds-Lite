@@ -1,0 +1,77 @@
+# ThreatFeeds Lite — LLM Provider Configuration (template)
+#
+# This file is a template. The real config lives at
+# config/llm-providers.yaml, which is GITIGNORED because it can hold
+# API keys. Use the API to populate the real file:
+#
+#     PUT /api/llm/config
+#
+# Properties:
+#   * enabled is FALSE by default. Smart-mode features in the normalizer
+#     refuse to run while disabled.
+#   * api_key is WRITE-ONLY. GET /api/llm/config never returns it — only
+#     "***" when set, or "" when unset. PUT with "***" means "keep the
+#     existing value"; any other string replaces it.
+#   * skip_tls_verify is per-provider and DISABLES certificate validation
+#     for that provider's outbound requests. Intended for self-hosted or
+#     lab use only. A WARNING is logged on every request when enabled.
+#
+# Supported `kind` values:
+#   openai             — OpenAI public API
+#   anthropic          — Anthropic public API
+#   ollama             — local Ollama server (no API key required)
+#   openai_compatible  — any server speaking the OpenAI chat-completions
+#                        wire shape (Together, Groq, vLLM, LM Studio, …)
+
+enabled: false
+default_provider: null
+providers: []
+
+# Example entries — uncomment and edit, then PUT to /api/llm/config:
+#
+# providers:
+#   - name: openai-prod
+#     kind: openai
+#     base_url: https://api.openai.com/v1
+#     model: gpt-4o-mini
+#     api_key: ""              # set via PUT; "" means unset
+#     timeout_seconds: 30
+#     max_retries: 2
+#     skip_tls_verify: false
+#
+#   - name: claude
+#     kind: anthropic
+#     base_url: https://api.anthropic.com
+#     model: claude-3-5-sonnet-latest
+#     api_key: ""
+#     timeout_seconds: 30
+#
+#   - name: ollama-local
+#     kind: ollama
+#     base_url: http://localhost:11434
+#     model: llama3.1
+#     api_key: ""              # not required for Ollama
+#
+#   - name: vllm-lab
+#     kind: openai_compatible
+#     base_url: http://10.0.0.5:8000/v1
+#     model: mistral-7b-instruct
+#     api_key: ""              # optional; sent only if non-empty
+#     skip_tls_verify: false   # set true only for self-signed lab certs
+#
+#   # OpenWebUI exposes its OpenAI-compatible endpoints under /api,
+#   # NOT under /v1. The api_key is a JWT issued in OpenWebUI under
+#   # Settings → Account → API Keys.
+#   #
+#   # Model discovery is path-tolerant: with base_url ending in /api,
+#   # chat-completions resolve at /api/chat/completions but the OpenAI
+#   # model catalog usually lives at /api/v1/models (not /api/models).
+#   # The compatible client probes both, plus /api/openai/models and the
+#   # host-root /v1/models and /models, and uses the first that returns
+#   # an OpenAI-shaped list — so you do not need to hand-tune base_url
+#   # just to make Discover Models work (prompts-029).
+#   - name: openwebui-local
+#     kind: openai_compatible
+#     base_url: http://openwebui:3000/api
+#     model: llama3.1           # whatever your OpenWebUI exposes
+#     api_key: ""               # JWT from OpenWebUI Settings → Account → API Keys
