@@ -19,6 +19,7 @@ from backend.config.loader import (
 from backend.db.manager import get_entry_count_for_source
 from backend.ingestion.api_pull import pull_api_source
 from backend.ingestion.jobs import job_store
+from backend.ingestion.refresh import run_tracked_pull
 from backend.ingestion.remote_feed import ingest_remote_feed
 from backend.ingestion.rss_pull import pull_rss_source
 from backend.ingestion.source_preview import (
@@ -110,6 +111,17 @@ async def _safe_kickoff(coro_fn, *args, label: str) -> None:
         logger.exception("auto_ingest_failed %s: %s", label, exc)
 
 
+def _kickoff_immediate_pull(kind: str, source: dict[str, Any]) -> None:
+    """Schedule an immediate background pull for a just-enabled feed (issue #1).
+
+    Runs the pull inside a job_store Job (via ``run_tracked_pull``) so the UI can
+    show a "pulling…" / green "ready" / red "error" marker per feed. Fire and
+    forget: the task records its own outcome and never raises out of here.
+    """
+    audit.info("immediate_pull_scheduled kind=%s name=%s", kind, source.get("name"))
+    asyncio.create_task(run_tracked_pull(kind, source))
+
+
 # ── Listener ──────────────────────────────────────────────────────────────────
 
 
@@ -166,10 +178,13 @@ async def update_api_pull(name: str, body: dict[str, Any]) -> dict[str, Any]:
     data = load_sources()
     sources: list = data.get("api_pull", [])
     idx = _find_index(name, sources)
+    old_enabled = bool(sources[idx].get("enabled", True))
     body["name"] = name
     body = _restore_source_secrets(body, sources[idx])
     sources[idx] = body
     save_sources(data)
+    if bool(body.get("enabled", True)) and not old_enabled:
+        _kickoff_immediate_pull("api_pull", body)
     return _redact_source(body)
 
 
@@ -215,10 +230,13 @@ async def update_rss_pull(name: str, body: dict[str, Any]) -> dict[str, Any]:
     data = load_sources()
     sources: list = data.get("rss_pull", [])
     idx = _find_index(name, sources)
+    old_enabled = bool(sources[idx].get("enabled", True))
     body["name"] = name
     body = _restore_source_secrets(body, sources[idx])
     sources[idx] = body
     save_sources(data)
+    if bool(body.get("enabled", True)) and not old_enabled:
+        _kickoff_immediate_pull("rss_pull", body)
     return _redact_source(body)
 
 
@@ -273,10 +291,13 @@ async def update_remote_json_pull(name: str, body: dict[str, Any]) -> dict[str, 
     data = load_sources()
     sources: list = data.get("remote_json_pull", [])
     idx = _find_index(name, sources)
+    old_enabled = bool(sources[idx].get("enabled", True))
     body["name"] = name
     body = _restore_source_secrets(body, sources[idx])
     sources[idx] = body
     save_sources(data)
+    if bool(body.get("enabled", True)) and not old_enabled:
+        _kickoff_immediate_pull("remote_json_pull", body)
     return _redact_source(body)
 
 
@@ -363,6 +384,9 @@ async def save_threat_intel_sources(
     """
     catalog = {item["name"]: item for item in load_default_sources() if item.get("name")}
     data = load_sources()
+    # Feeds that transition from disabled -> enabled get an immediate pull after
+    # the config is persisted (issue #1).
+    newly_enabled: list[tuple[str, dict[str, Any]]] = []
     for toggle in body:
         item = catalog.get(toggle.name)
         if item is None:
@@ -395,6 +419,7 @@ async def save_threat_intel_sources(
                 bucket[idx] = entry
             else:
                 bucket.append(entry)
+                newly_enabled.append((kind, entry))
             audit.info(
                 "threat_intel_enabled name=%s kind=%s continuous=%s interval=%s",
                 toggle.name, kind, toggle.continuous, interval,
@@ -403,6 +428,8 @@ async def save_threat_intel_sources(
             bucket.pop(idx)
             audit.info("threat_intel_disabled name=%s kind=%s", toggle.name, kind)
     save_sources(data)
+    for kind, entry in newly_enabled:
+        _kickoff_immediate_pull(kind, entry)
     return _build_catalog_view()
 
 

@@ -10,6 +10,8 @@ import { Plus, Trash2, Pencil, Check, X, RefreshCw, ChevronDown, ChevronUp } fro
 import Toggle from './Toggle'
 import SourceFieldsPanel from './SourceFieldsPanel'
 import SourcePreviewModal from './SourcePreviewModal'
+import FeedStatusMarker from './FeedStatusMarker'
+import { useFeedStatus } from '../hooks/useFeedStatus'
 import { clsx } from 'clsx'
 
 interface Props {
@@ -45,6 +47,8 @@ export default function SourceList({
 }: Props) {
   const qc = useQueryClient()
   const invalidate = () => qc.invalidateQueries({ queryKey: [queryKey] })
+
+  const { statusFor } = useFeedStatus()
 
   const [adding, setAdding] = useState(false)
   const [draft, setDraft] = useState<SourceDef>(EMPTY_SOURCE)
@@ -100,7 +104,13 @@ export default function SourceList({
       const src = sources.find(s => s.name === name)!
       return onUpdate(name, { ...src, enabled })
     },
-    onSuccess: invalidate,
+    onSuccess: () => {
+      invalidate()
+      // Enabling a source kicks off an immediate background pull (issue #1);
+      // refresh the live status queries so its marker appears promptly.
+      qc.invalidateQueries({ queryKey: ['active-jobs'] })
+      qc.invalidateQueries({ queryKey: ['viewer-summary', 'feed-status'] })
+    },
   })
 
   const handleRefresh = (name: string) => {
@@ -181,6 +191,7 @@ export default function SourceList({
                   <p className="text-xs text-gray-500 truncate">{src.url}</p>
                 </div>
                 <span className="text-xs text-gray-600 shrink-0">{src.interval_minutes ?? 15}m</span>
+                <FeedStatusMarker status={statusFor(src.name)} className="shrink-0" />
                 {refreshResults[src.name] && <RefreshBadge result={refreshResults[src.name]} />}
                 {onRefresh && (
                   <button

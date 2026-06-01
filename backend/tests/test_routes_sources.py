@@ -330,7 +330,6 @@ async def test_threat_intel_save_unknown_name_404(monkeypatch):
 
 
 # ── Secret redaction (prompts-045 security audit, BLOCKER #1) ──────────────────
-
 @pytest.mark.asyncio
 async def test_list_api_pull_redacts_header_values(monkeypatch):
     """GET must never return raw per-source request header secrets."""
@@ -410,3 +409,158 @@ async def test_update_api_pull_rotates_new_header_value(monkeypatch):
     rotated = {"name": "src", "url": "http://x", "headers": {"Authorization": "Bearer NEW"}}
     await rs.update_api_pull("src", rotated)
     assert yaml_state["api_pull"][0]["headers"]["Authorization"] == "Bearer NEW"
+
+
+# ── Immediate pull on enable (issue #1) ───────────────────────────────────────
+
+
+def _capture_kickoffs(rs, monkeypatch) -> list[tuple[str, dict]]:
+    """Patch _kickoff_immediate_pull to record (kind, source) instead of spawning."""
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        rs, "_kickoff_immediate_pull", lambda kind, source: calls.append((kind, source))
+    )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_update_api_pull_disabled_to_enabled_triggers_pull(monkeypatch):
+    """Flipping an api_pull feed off->on schedules an immediate pull."""
+    import backend.api.routes_sources as rs
+
+    yaml_state = {"api_pull": [{"name": "src", "url": "http://x", "enabled": False}]}
+    monkeypatch.setattr(rs, "load_sources", lambda: yaml_state)
+    monkeypatch.setattr(rs, "save_sources", lambda d: yaml_state.update(d))
+    calls = _capture_kickoffs(rs, monkeypatch)
+
+    await rs.update_api_pull("src", {"url": "http://x", "enabled": True})
+
+    assert [k for k, _ in calls] == ["api_pull"]
+    assert calls[0][1]["name"] == "src"
+
+
+@pytest.mark.asyncio
+async def test_update_api_pull_already_enabled_does_not_trigger(monkeypatch):
+    """Re-saving an already-enabled feed must NOT schedule a pull."""
+    import backend.api.routes_sources as rs
+
+    yaml_state = {"api_pull": [{"name": "src", "url": "http://x", "enabled": True}]}
+    monkeypatch.setattr(rs, "load_sources", lambda: yaml_state)
+    monkeypatch.setattr(rs, "save_sources", lambda d: yaml_state.update(d))
+    calls = _capture_kickoffs(rs, monkeypatch)
+
+    await rs.update_api_pull("src", {"url": "http://y", "enabled": True})
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_update_api_pull_disable_does_not_trigger(monkeypatch):
+    """Disabling a feed must NOT schedule a pull."""
+    import backend.api.routes_sources as rs
+
+    yaml_state = {"api_pull": [{"name": "src", "url": "http://x", "enabled": True}]}
+    monkeypatch.setattr(rs, "load_sources", lambda: yaml_state)
+    monkeypatch.setattr(rs, "save_sources", lambda d: yaml_state.update(d))
+    calls = _capture_kickoffs(rs, monkeypatch)
+
+    await rs.update_api_pull("src", {"url": "http://x", "enabled": False})
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_update_rss_pull_disabled_to_enabled_triggers_pull(monkeypatch):
+    """Flipping an rss_pull feed off->on schedules an immediate pull."""
+    import backend.api.routes_sources as rs
+
+    yaml_state = {"rss_pull": [{"name": "feed", "url": "http://x", "enabled": False}]}
+    monkeypatch.setattr(rs, "load_sources", lambda: yaml_state)
+    monkeypatch.setattr(rs, "save_sources", lambda d: yaml_state.update(d))
+    calls = _capture_kickoffs(rs, monkeypatch)
+
+    await rs.update_rss_pull("feed", {"url": "http://x", "enabled": True})
+
+    assert [k for k, _ in calls] == ["rss_pull"]
+
+
+@pytest.mark.asyncio
+async def test_update_remote_json_pull_disabled_to_enabled_triggers_pull(monkeypatch):
+    """Flipping a remote_json_pull feed off->on schedules an immediate pull."""
+    import backend.api.routes_sources as rs
+
+    yaml_state = {"remote_json_pull": [{"name": "rj", "url": "http://x", "enabled": False}]}
+    monkeypatch.setattr(rs, "load_sources", lambda: yaml_state)
+    monkeypatch.setattr(rs, "save_sources", lambda d: yaml_state.update(d))
+    calls = _capture_kickoffs(rs, monkeypatch)
+
+    await rs.update_remote_json_pull("rj", {"url": "http://x", "enabled": True})
+
+    assert [k for k, _ in calls] == ["remote_json_pull"]
+
+
+@pytest.mark.asyncio
+async def test_threat_intel_enable_triggers_immediate_pull(monkeypatch):
+    """Enabling a catalogue feed schedules an immediate pull for the new entry."""
+    import backend.api.routes_sources as rs
+
+    yaml_state: dict = {}
+    monkeypatch.setattr(rs, "load_default_sources", lambda: _FAKE_CATALOG)
+    monkeypatch.setattr(rs, "load_sources", lambda: yaml_state)
+    monkeypatch.setattr(rs, "save_sources", lambda d: yaml_state.update(d))
+    calls = _capture_kickoffs(rs, monkeypatch)
+
+    await rs.save_threat_intel_sources(
+        [rs.ThreatIntelToggle(name="cisa_kev", enabled=True)]
+    )
+
+    assert [k for k, _ in calls] == ["remote_json_pull"]
+    assert calls[0][1]["name"] == "cisa_kev"
+
+
+@pytest.mark.asyncio
+async def test_threat_intel_resave_enabled_does_not_trigger(monkeypatch):
+    """Re-saving an already-enabled catalogue feed must NOT schedule a pull."""
+    import backend.api.routes_sources as rs
+
+    yaml_state: dict = {
+        "remote_json_pull": [
+            {"name": "cisa_kev", "enabled": True, "url": "https://example.com/kev.json",
+             "continuous": True, "interval_minutes": 120,
+             "source_origin": "threat_intel_catalog"}
+        ]
+    }
+    monkeypatch.setattr(rs, "load_default_sources", lambda: _FAKE_CATALOG)
+    monkeypatch.setattr(rs, "load_sources", lambda: yaml_state)
+    monkeypatch.setattr(rs, "save_sources", lambda d: yaml_state.update(d))
+    calls = _capture_kickoffs(rs, monkeypatch)
+
+    await rs.save_threat_intel_sources(
+        [rs.ThreatIntelToggle(name="cisa_kev", enabled=True)]
+    )
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_threat_intel_disable_does_not_trigger(monkeypatch):
+    """Disabling a catalogue feed must NOT schedule a pull."""
+    import backend.api.routes_sources as rs
+
+    yaml_state: dict = {
+        "remote_json_pull": [
+            {"name": "cisa_kev", "enabled": True, "url": "https://example.com/kev.json",
+             "continuous": True, "interval_minutes": 120,
+             "source_origin": "threat_intel_catalog"}
+        ]
+    }
+    monkeypatch.setattr(rs, "load_default_sources", lambda: _FAKE_CATALOG)
+    monkeypatch.setattr(rs, "load_sources", lambda: yaml_state)
+    monkeypatch.setattr(rs, "save_sources", lambda d: yaml_state.update(d))
+    calls = _capture_kickoffs(rs, monkeypatch)
+
+    await rs.save_threat_intel_sources(
+        [rs.ThreatIntelToggle(name="cisa_kev", enabled=False)]
+    )
+
+    assert calls == []
