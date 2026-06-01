@@ -1,5 +1,3 @@
-developer_notes/*
-
 # ──────────────────────────────────────────
 # OS / Editor
 # ──────────────────────────────────────────
@@ -93,7 +91,26 @@ core.*
 .pids/
 
 # ──────────────────────────────────────────
-# Development history bundle (agent/dev notes — not part of the release)
-# Untracked: kept locally so maintainers can optionally archive it.
+# Coding-agent scaffolding (not part of the release)
+# Guidance, plans, notes, history, and startup entry points are kept local so
+# the published repository contains only the application.
 # ──────────────────────────────────────────
-development_history/
+/.coding_agent/
+/AGENTS.md
+/CLAUDE.md
+
+# ──────────────────────────────────────────
+# Coding-agent local runtime config (machine-local, regenerated per clone)
+# ──────────────────────────────────────────
+/.opencode/
+/.claude/
+/.agents/
+/opencode.json
+/opencode.jsonc
+
+# ──────────────────────────────────────────
+# Local agent / test scratch files
+# ──────────────────────────────────────────
+*.local.*
+/tmp-*
+/scratch/
