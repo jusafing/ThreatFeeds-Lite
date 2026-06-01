@@ -48,7 +48,6 @@ async def ingest_remote_feed(
             response = await client.get(url)
             response.raise_for_status()
             content_type = response.headers.get("content-type", "")
-            content_encoding = response.headers.get("content-encoding", "")
             if content_type and not any(f in content_type for f in _ALLOWED_CT_FRAGMENTS):
                 raise ValueError(f"Unexpected content-type: {content_type}")
             raw_bytes = response.content
@@ -61,6 +60,10 @@ async def ingest_remote_feed(
         }
 
     # ── Decompress if needed (prompts-021B) ────────────────────────────────
+    # NOTE: ``content_encoding`` (transport-level ``Content-Encoding: gzip``) is
+    # intentionally NOT forwarded — httpx already transparently decodes it, so
+    # ``raw_bytes`` is plaintext here. Only *content* packaging (a ``.json.gz``
+    # file, signalled by URL extension or ``Content-Type``) needs unpacking.
     url_filename = os.path.basename(urlparse(url).path) or None
     try:
         from backend.config.loader import load_max_decompressed_bytes
@@ -68,7 +71,6 @@ async def ingest_remote_feed(
             url_filename,
             raw_bytes,
             content_type=content_type,
-            content_encoding=content_encoding,
             max_bytes=load_max_decompressed_bytes(),
         )
     except DecompressionError as exc:

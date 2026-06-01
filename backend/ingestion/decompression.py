@@ -120,7 +120,19 @@ def decompress_if_needed(
     declared: str | None = ext
     if declared is None:
         declared = _extension_from_content_type(content_type)
+
+    # ── Transport-level Content-Encoding (remote pull only) ────────────────
+    # `Content-Encoding: gzip` is a *transport* encoding that HTTP clients
+    # (httpx/requests) transparently decode — by the time we see the body it
+    # is already plaintext. Treat this header as a compression hint ONLY when
+    # the body still carries the gzip magic (i.e. the client did NOT decode
+    # it). If the magic is absent, the payload was already decompressed in
+    # transit, so pass it through unchanged instead of raising a spurious
+    # MagicMismatchError. Filename/Content-Type declarations describe *content*
+    # packaging (e.g. a `.json.gz` file) and are not relaxed here.
     if declared is None and content_encoding and "gzip" in content_encoding.lower():
+        if not body.startswith(GZIP_MAGIC):
+            return (filename or "", body)
         declared = ".gz"
 
     if declared is None:
