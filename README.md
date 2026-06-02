@@ -257,7 +257,9 @@ scripts/api_client.py --help          # full syntax for all commands
 
 - `--url` — base API endpoint URL (default `http://127.0.0.1:8000`). Include the
   scheme; use an `https://…` URL (optionally with a path prefix) to reach a
-  server behind a reverse proxy / alias.
+  server behind a reverse proxy / alias. The value must contain no whitespace —
+  a stray inline comment (e.g. copied from a `.env` template) is rejected with a
+  clear error instead of an obscure urllib traceback.
 - `--username` / `-u`, `--password` / `-p` — credentials for an auth-enabled
   server (omit entirely when auth is disabled — see [Authentication](#authentication) below).
 - `--insecure` / `-k` — skip TLS certificate verification (accept self-signed /
