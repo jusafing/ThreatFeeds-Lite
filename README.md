@@ -296,7 +296,7 @@ scripts/api_client.py get-normalized
 scripts/api_client.py get-normalized feedA --max 20
 
 # Exact-column filter, validated against the normalized schema
-scripts/api_client.py get-normalized --field indicator_type=ipv4
+scripts/api_client.py get-normalized --field indicator_type=ipv4-addr
 ```
 
 > **Raw vs normalized are independent stores.** `get-raw` (and

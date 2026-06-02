@@ -72,7 +72,7 @@ verification only and are never committed.
 | `T8-query-critical-cves` | read | NL query: critical 2026 CVEs by vendor (LLM) |
 | `T9-query-actor-indicators` | read | NL query: high-severity indicators by actor (LLM) |
 | `T10-field-raw-severity` | read | Field search from raw: exact `severity=critical` via `--field` (no LLM) |
-| `T11-field-normalized-indicator-type` | read | Field search from normalized: exact `indicator_type=ipv4` via `--field` (no LLM) |
+| `T11-field-normalized-indicator-type` | read | Field search from normalized: exact `indicator_type=ipv4-addr` via `--field` (no LLM) |
 
 The natural-language tests (T7–T9) require an LLM provider configured on the
 server; without one they record an HTTP `503`. See the **API Client Script →

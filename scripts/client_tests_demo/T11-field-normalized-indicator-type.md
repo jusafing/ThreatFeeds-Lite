@@ -1,4 +1,4 @@
-# T11 — Field search from normalized: `indicator_type=ipv4`
+# T11 — Field search from normalized: `indicator_type=ipv4-addr`
 
 Deterministic exact-column filter (no LLM required) added in issue_local_02,
 applied to the **normalized** store. The repeatable `--field NAME=VALUE` flag
@@ -14,13 +14,13 @@ the flag cannot be used to inject arbitrary SQL.
 
 ```bash
 scripts/api_client.py --url http://<test-server>:8001 \
-  get-normalized --field indicator_type=ipv4 --max 25
+  get-normalized --field indicator_type=ipv4-addr --max 25
 ```
 
 ## Response (shape)
 
-`GET /api/normalizer/entries?field=indicator_type=ipv4&limit=25` returns a JSON
-array of normalized rows whose `indicator_type` column equals `ipv4` exactly:
+`GET /api/normalizer/entries?field=indicator_type=ipv4-addr&limit=25` returns a JSON
+array of normalized rows whose `indicator_type` column equals `ipv4-addr` exactly:
 
 ```json
 [
@@ -28,7 +28,7 @@ array of normalized rows whose `indicator_type` column equals `ipv4` exactly:
     "id": 17,
     "source_entry_id": 103,
     "indicator": "...",
-    "indicator_type": "ipv4",
+    "indicator_type": "ipv4-addr",
     "threat_type": "...",
     "severity": "...",
     "confidence": 0.0,

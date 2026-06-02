@@ -240,9 +240,9 @@ run_test 10 field-raw-severity "Field search from raw: severity=critical" read \
   "Fetch raw rows filtered by an exact column value (severity=critical) using the repeatable --field flag. Unknown columns are ignored server-side." \
   -- get-raw --field severity=critical --max 25
 
-run_test 11 field-normalized-indicator-type "Field search from normalized: indicator_type=ipv4" read \
-  "Fetch normalized rows filtered by an exact column value (indicator_type=ipv4) from the normalized store. Validated against the normalized schema." \
-  -- get-normalized --field indicator_type=ipv4 --max 25
+run_test 11 field-normalized-indicator-type "Field search from normalized: indicator_type=ipv4-addr" read \
+  "Fetch normalized rows filtered by an exact column value (indicator_type=ipv4-addr) from the normalized store. Validated against the normalized schema." \
+  -- get-normalized --field indicator_type=ipv4-addr --max 25
 
 exec_log "run finished: results in ${OUT_DIR}"
 echo "Done. Results: ${OUT_DIR}"
