@@ -26,7 +26,11 @@ import urllib.request
 from abc import ABC, abstractmethod
 from typing import Any, Callable
 
-from backend.llm.errors import LLMProviderError, LLMTransportError
+from backend.llm.errors import (
+    LLMEmptyContentError,
+    LLMProviderError,
+    LLMTransportError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -257,10 +261,11 @@ def _extract_openai_content(
             "output-token budget was exhausted by reasoning or the request "
             "timed out"
         )
-    raise LLMProviderError(
+    raise LLMEmptyContentError(
         f"provider {provider_name!r} returned empty content: {detail}",
         status=status,
         body=body_str,
+        finish_reason=finish_reason,
     )
 
 

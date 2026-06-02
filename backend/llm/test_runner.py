@@ -32,7 +32,11 @@ import logging
 from typing import Any
 
 from backend.llm.client import LLMClient
-from backend.llm.errors import LLMProviderError, LLMTransportError
+from backend.llm.errors import (
+    LLMEmptyContentError,
+    LLMProviderError,
+    LLMTransportError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +48,14 @@ _SAMPLE_LIMIT = 80
 # minimal across providers; some refuse max_tokens=1 (e.g. Anthropic).
 _PING_PROMPT = "ping"
 _PING_SYSTEM = "You are a connectivity probe. Reply with the single word 'pong'."
+# issue_local_02: the connectivity probe must mirror real proposal calls more
+# closely. max_tokens=8 was so tight that reasoning models / OpenAI-compatible
+# proxies (e.g. OpenWebUI) burned the whole budget on hidden reasoning and
+# answered HTTP 200 with empty content (finish_reason=length) — a FALSE probe
+# failure even though the provider was reachable and authenticated. A moderate
+# budget removes most false-empties cheaply; the LLMEmptyContentError soft-pass
+# below covers whatever remains.
+_PING_MAX_TOKENS = 256
 
 
 def _new_step_record(step: str) -> dict[str, Any]:
@@ -272,12 +284,40 @@ def run_provider_test(client: LLMClient) -> dict[str, Any]:
         step_sink_b: list[dict[str, Any]] = []
         prev_tap_b = _install_tap(client, "complete", step_sink_b)
         try:
-            out = client.complete(_PING_PROMPT, system=_PING_SYSTEM, max_tokens=8)
+            out = client.complete(
+                _PING_PROMPT, system=_PING_SYSTEM, max_tokens=_PING_MAX_TOKENS
+            )
             sample = (out or "")[:_SAMPLE_LIMIT]
             details.extend(step_sink_b)
             logger.info(
                 "llm.test step=complete provider=%s ok=true sample_len=%d",
                 client.name, len(sample),
+            )
+        except LLMEmptyContentError as exc:
+            # issue_local_02 soft pass: the provider answered HTTP 200 but the
+            # model produced no final text within the probe budget (reasoning
+            # model / proxy spent the budget thinking, finish_reason=length).
+            # That proves reachability AND authentication, so it must NOT fail
+            # the connectivity test. Record a non-blocking warning on the step
+            # and leave overall_ok untouched. Genuine provider/transport errors
+            # (caught below) still fail the aggregate.
+            if not step_sink_b:
+                rec = _new_step_record("complete")
+                step_sink_b.append(rec)
+            warn = (
+                "reachable and authenticated, but the model returned no answer "
+                "within the probe's token budget"
+            )
+            if getattr(exc, "finish_reason", None):
+                warn += f" (finish_reason={exc.finish_reason})"
+            warn += " — this does not affect connectivity"
+            step_sink_b[-1]["warning"] = warn
+            sample = warn[:_SAMPLE_LIMIT]
+            details.extend(step_sink_b)
+            logger.info(
+                "llm.test step=complete provider=%s ok=true soft_pass=empty_content "
+                "finish_reason=%s",
+                client.name, getattr(exc, "finish_reason", None),
             )
         except (LLMProviderError, LLMTransportError) as exc:
             overall_ok = False
