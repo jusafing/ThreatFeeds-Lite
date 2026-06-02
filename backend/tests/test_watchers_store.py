@@ -96,6 +96,44 @@ def test_validate_rejects_non_numeric_value_for_numeric_match_type():
     assert "numeric" in str(exc.value).lower()
 
 
+def test_validate_accepts_contains_match_type_and_case_sensitive():
+    out = store.validate_definition(
+        _defn(conditions=[{"field": "title", "value": "rce", "match_type": "contains",
+                           "case_sensitive": True}])
+    )
+    cond = out["conditions"][0]
+    assert cond["match_type"] == "contains"
+    assert cond["case_sensitive"] is True
+
+
+def test_validate_condition_case_sensitive_defaults_false():
+    out = store.validate_definition(
+        _defn(conditions=[{"field": "title", "value": "rce", "match_type": "contains"}])
+    )
+    assert out["conditions"][0]["case_sensitive"] is False
+
+
+def test_validate_cleanup_interval_default_and_round_trip():
+    out = store.validate_definition(_defn())
+    assert out["cleanup_interval_sec"] == 60
+    out2 = store.validate_definition(_defn(cleanup_interval_sec=300))
+    assert out2["cleanup_interval_sec"] == 300
+
+
+@pytest.mark.parametrize("bad", [5, 9, 86401, 100000])
+def test_validate_rejects_out_of_range_cleanup_interval(bad):
+    with pytest.raises(ValueError):
+        store.validate_definition(_defn(cleanup_interval_sec=bad))
+
+
+@pytest.mark.asyncio
+async def test_list_watchers_cleanup_sync_returns_all_watchers():
+    await store.create_watcher(_defn(name="Clean One", cleanup_interval_sec=120))
+    rows = store.list_watchers_cleanup_sync()
+    ids = {r["id"]: r["cleanup_interval_sec"] for r in rows}
+    assert ids.get("clean-one") == 120
+
+
 @pytest.mark.asyncio
 async def test_last_triggered_at_reflects_latest_event():
     await store.create_watcher(_defn())
@@ -305,9 +343,10 @@ async def test_migration_v2_to_v3_adds_publish_columns(tmp_path, monkeypatch):
     await store.init_watchers_db()
 
     conn = sqlite3.connect(db_path)
-    assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+    assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 5
     wcols = {r[1] for r in conn.execute("PRAGMA table_info(watchers)")}
     assert {"publish_target", "webhook_url", "webhook_format", "auth_header", "auth_value"} <= wcols
+    assert "cleanup_interval_sec" in wcols
     ecols = {r[1] for r in conn.execute("PRAGMA table_info(watcher_events)")}
     assert {"delivery_status", "delivery_error", "delivery_detail", "delivered_at"} <= ecols
     conn.close()

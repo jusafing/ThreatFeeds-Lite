@@ -1248,7 +1248,7 @@ export type WatcherSeverity = 'low' | 'medium' | 'high' | 'critical'
 export type WatcherDataset = 'all' | 'raw' | 'normalized'
 export type WatcherMode = 'realtime' | 'scheduled'
 export type WatcherFormat = 'json' | 'csv' | 'xml'
-export type WatcherMatchType = 'exact' | 'wildcard' | 'regex' | 'gte' | 'lte'
+export type WatcherMatchType = 'exact' | 'wildcard' | 'regex' | 'gte' | 'lte' | 'contains'
 export type WatcherPublishTarget = 'local' | 'webhook' | 'http'
 export type WatcherWebhookFormat = 'generic' | 'discord' | 'slack' | 'teams'
 
@@ -1256,6 +1256,7 @@ export interface WatcherCondition {
   field: string
   value: string
   match_type: WatcherMatchType
+  case_sensitive?: boolean
 }
 
 export interface DeliveryDetail {
@@ -1278,6 +1279,7 @@ export interface WatcherInput {
   interval_sec: number
   format: WatcherFormat
   max_feed_events: number
+  cleanup_interval_sec: number
   enabled: boolean
   publish_target: WatcherPublishTarget
   webhook_url: string | null

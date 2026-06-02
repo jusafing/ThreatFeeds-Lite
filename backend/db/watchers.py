@@ -54,7 +54,12 @@ _WATCHERS_DB_PATH = _PROJECT_ROOT / "data" / "watchers.db"
 #        webhook watchers are best-effort backfilled by URL host. watcher_events
 #        gain delivery_detail (JSON: status/headers/body/url) so a failed
 #        delivery can be inspected in a UI card.
-_WATCHERS_SCHEMA_VERSION = 4
+#   v5 — periodic feed retention (issue_local_008): watchers gain
+#        cleanup_interval_sec (seconds between background trims of a watcher's
+#        feed down to its max_feed_events). Immediate inserts still keep up to
+#        the global watcher_max_events hard limit; the periodic job enforces the
+#        per-watcher max_feed_events.
+_WATCHERS_SCHEMA_VERSION = 5
 
 # Allowed publish targets for a watcher (issue_local_007).
 #   local   — publish only to the public /feed/watcher/<id>/ URL (default).
@@ -96,13 +101,24 @@ VALID_DATASETS: frozenset[str] = frozenset({"all", "raw", "normalized"})
 VALID_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high", "critical"})
 VALID_MODES: frozenset[str] = frozenset({"realtime", "scheduled"})
 VALID_FORMATS: frozenset[str] = frozenset({"json", "csv", "xml"})
-VALID_MATCH_TYPES: frozenset[str] = frozenset({"exact", "wildcard", "regex", "gte", "lte"})
+VALID_MATCH_TYPES: frozenset[str] = frozenset(
+    {"exact", "wildcard", "regex", "gte", "lte", "contains"}
+)
 
 # Match types that compare numerically and therefore require a numeric value.
 NUMERIC_MATCH_TYPES: frozenset[str] = frozenset({"gte", "lte"})
 
+# Match types whose comparison can honour a per-condition ``case_sensitive``
+# flag (issue_local_008). regex callers control case via inline flags, and the
+# numeric comparisons are case-agnostic, so neither is included here.
+CASE_AWARE_MATCH_TYPES: frozenset[str] = frozenset({"exact", "wildcard", "contains"})
+
 _MIN_INTERVAL_SEC = 5
 _MAX_FEED_EVENTS_DEFAULT = 10
+# Periodic feed-retention cleanup interval (issue_local_008).
+_CLEANUP_INTERVAL_DEFAULT = 60
+_CLEANUP_INTERVAL_MIN = 10
+_CLEANUP_INTERVAL_MAX = 86400
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _MAX_SLUG_LEN = 64
 
@@ -119,6 +135,7 @@ CREATE TABLE IF NOT EXISTS watchers (
     interval_sec     INTEGER NOT NULL DEFAULT 120,
     format           TEXT    NOT NULL DEFAULT 'json',
     max_feed_events  INTEGER NOT NULL DEFAULT 10,
+    cleanup_interval_sec INTEGER NOT NULL DEFAULT 60,
     enabled          INTEGER NOT NULL DEFAULT 0,
     trigger_count    INTEGER NOT NULL DEFAULT 0,
     last_eval_raw_id  INTEGER NOT NULL DEFAULT 0,
@@ -309,6 +326,13 @@ async def _migrate(db: aiosqlite.Connection, from_version: int) -> None:
                 await db.execute(
                     "UPDATE watchers SET webhook_format = ? WHERE id = ?", (fmt, wid)
                 )
+    if from_version < 5:
+        # Periodic feed retention (issue_local_008): add the cleanup interval
+        # column. Existing watchers default to 60s.
+        await _add_columns_if_missing(
+            db, "watchers",
+            {"cleanup_interval_sec": "INTEGER NOT NULL DEFAULT 60"},
+        )
 
 
 async def _add_columns_if_missing(
@@ -350,14 +374,16 @@ def _row_to_watcher(row: sqlite3.Row | aiosqlite.Row) -> dict[str, Any]:  # type
     return d
 
 
-def normalize_conditions(conditions: Any) -> list[dict[str, str]]:
+def normalize_conditions(conditions: Any) -> list[dict[str, Any]]:
     """Validate + normalize the field-condition list.
 
-    Each condition is ``{field, value, match_type}``. ``field`` may be empty/
-    ``"*"`` (match any field). ``match_type`` defaults to ``exact``. Regex
-    conditions are pre-compiled here to reject invalid patterns early.
+    Each condition is ``{field, value, match_type, case_sensitive}``. ``field``
+    may be empty/``"*"`` (match any field). ``match_type`` defaults to ``exact``.
+    Regex conditions are pre-compiled here to reject invalid patterns early.
+    ``case_sensitive`` (default False) only affects the string match types
+    (exact / wildcard / contains); it is ignored for regex / gte / lte.
     """
-    out: list[dict[str, str]] = []
+    out: list[dict[str, Any]] = []
     if not isinstance(conditions, list):
         raise ValueError("conditions must be a list")
     for raw in conditions:
@@ -366,6 +392,7 @@ def normalize_conditions(conditions: Any) -> list[dict[str, str]]:
         field = str(raw.get("field", "") or "").strip()
         value = str(raw.get("value", "") or "")
         match_type = str(raw.get("match_type", "exact") or "exact").strip().lower()
+        case_sensitive = bool(raw.get("case_sensitive", False))
         if match_type not in VALID_MATCH_TYPES:
             raise ValueError(f"invalid match_type: {match_type!r}")
         if value == "":
@@ -384,7 +411,12 @@ def normalize_conditions(conditions: Any) -> list[dict[str, str]]:
                 raise ValueError(
                     f"condition value for '{match_type}' must be numeric, got {value!r}"
                 ) from None
-        out.append({"field": field, "value": value, "match_type": match_type})
+        out.append({
+            "field": field,
+            "value": value,
+            "match_type": match_type,
+            "case_sensitive": case_sensitive,
+        })
     return out
 
 
@@ -439,6 +471,18 @@ def validate_definition(data: dict[str, Any]) -> dict[str, Any]:
     if max_feed_events < 1:
         raise ValueError("max_feed_events must be >= 1")
 
+    try:
+        cleanup_interval_sec = int(
+            data.get("cleanup_interval_sec", _CLEANUP_INTERVAL_DEFAULT)
+        )
+    except (TypeError, ValueError):
+        raise ValueError("cleanup_interval_sec must be an integer")
+    if not (_CLEANUP_INTERVAL_MIN <= cleanup_interval_sec <= _CLEANUP_INTERVAL_MAX):
+        raise ValueError(
+            f"cleanup_interval_sec must be between {_CLEANUP_INTERVAL_MIN} "
+            f"and {_CLEANUP_INTERVAL_MAX}"
+        )
+
     enabled = bool(data.get("enabled", False))
 
     publish_target = str(data.get("publish_target", "local") or "local").strip().lower()
@@ -486,6 +530,7 @@ def validate_definition(data: dict[str, Any]) -> dict[str, Any]:
         "interval_sec": interval_sec,
         "format": fmt,
         "max_feed_events": max_feed_events,
+        "cleanup_interval_sec": cleanup_interval_sec,
         "enabled": enabled,
         "publish_target": publish_target,
         "webhook_url": webhook_url,
@@ -514,18 +559,19 @@ async def create_watcher(data: dict[str, Any]) -> dict[str, Any]:
             """
             INSERT INTO watchers (
                 id, name, severity, dataset, feeds_json, conditions_json,
-                mode, interval_sec, format, max_feed_events, enabled,
-                trigger_count, last_eval_raw_id, last_eval_norm_id,
+                mode, interval_sec, format, max_feed_events, cleanup_interval_sec,
+                enabled, trigger_count, last_eval_raw_id, last_eval_norm_id,
                 publish_target, webhook_url, webhook_format, auth_header, auth_value,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 wid, fields["name"], fields["severity"], fields["dataset"],
                 json.dumps(fields["feeds"], ensure_ascii=False),
                 json.dumps(fields["conditions"], ensure_ascii=False),
                 fields["mode"], fields["interval_sec"], fields["format"],
-                fields["max_feed_events"], int(fields["enabled"]),
+                fields["max_feed_events"], fields["cleanup_interval_sec"],
+                int(fields["enabled"]),
                 fields["publish_target"], fields["webhook_url"] or None,
                 fields["webhook_format"],
                 fields["auth_header"] or None, fields["auth_value"] or None,
@@ -548,7 +594,7 @@ async def update_watcher(watcher_id: str, data: dict[str, Any]) -> dict[str, Any
             UPDATE watchers SET
                 name = ?, severity = ?, dataset = ?, feeds_json = ?,
                 conditions_json = ?, mode = ?, interval_sec = ?, format = ?,
-                max_feed_events = ?, enabled = ?,
+                max_feed_events = ?, cleanup_interval_sec = ?, enabled = ?,
                 publish_target = ?, webhook_url = ?, webhook_format = ?,
                 auth_header = ?, auth_value = ?,
                 updated_at = ?
@@ -559,7 +605,8 @@ async def update_watcher(watcher_id: str, data: dict[str, Any]) -> dict[str, Any
                 json.dumps(fields["feeds"], ensure_ascii=False),
                 json.dumps(fields["conditions"], ensure_ascii=False),
                 fields["mode"], fields["interval_sec"], fields["format"],
-                fields["max_feed_events"], int(fields["enabled"]),
+                fields["max_feed_events"], fields["cleanup_interval_sec"],
+                int(fields["enabled"]),
                 fields["publish_target"], fields["webhook_url"] or None,
                 fields["webhook_format"],
                 fields["auth_header"] or None, fields["auth_value"] or None,
@@ -819,6 +866,56 @@ async def count_events(watcher_id: str) -> int:
     return int(row[0]) if row else 0
 
 
+async def cleanup_watcher_events(watcher_id: str, max_feed_events: int) -> int:
+    """Trim a watcher's stored events down to its ``max_feed_events`` newest rows.
+
+    This is the periodic feed-retention pass (issue_local_008): immediate inserts
+    keep up to the global ``watcher_max_events`` hard limit so a delivery backlog
+    is never lost, while this job enforces the per-watcher feed cap. Returns the
+    number of rows deleted.
+    """
+    await init_watchers_db()
+    keep = max(int(max_feed_events), 1)
+    async with aiosqlite.connect(_WATCHERS_DB_PATH) as db:
+        cur = await db.execute(
+            """
+            DELETE FROM watcher_events
+            WHERE watcher_id = ? AND id NOT IN (
+                SELECT id FROM watcher_events WHERE watcher_id = ?
+                ORDER BY id DESC LIMIT ?
+            )
+            """,
+            (watcher_id, watcher_id, keep),
+        )
+        deleted = cur.rowcount or 0
+        await cur.close()
+        await db.commit()
+    if deleted:
+        logger.info(
+            "watcher %s cleanup trimmed %d event(s) to max_feed_events=%d",
+            watcher_id, deleted, keep,
+        )
+    return deleted
+
+
+async def run_watcher_cleanup(watcher_id: str) -> int:
+    """Periodic-job entry point: trim a watcher to its current max_feed_events.
+
+    Reads ``max_feed_events`` fresh so a mid-flight edit takes effect on the next
+    tick. Returns the number of rows deleted (0 if the watcher is gone).
+    """
+    await init_watchers_db()
+    async with aiosqlite.connect(_WATCHERS_DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT max_feed_events FROM watchers WHERE id = ?", (watcher_id,)
+        )
+        row = await cur.fetchone()
+        await cur.close()
+    if row is None:
+        return 0
+    return await cleanup_watcher_events(watcher_id, int(row[0]))
+
+
 # ── Delivery (issue_local_007) ──────────────────────────────────────────────
 
 
@@ -898,3 +995,31 @@ def list_scheduled_watchers_sync() -> list[dict[str, Any]]:
     except sqlite3.OperationalError:
         return []
     return [{"id": r["id"], "interval_sec": int(r["interval_sec"])} for r in rows]
+
+
+def list_watchers_cleanup_sync() -> list[dict[str, Any]]:
+    """Return all watchers as ``{id, cleanup_interval_sec}`` for the periodic
+    feed-retention scheduler (issue_local_008).
+
+    Synchronous (sqlite3) so the APScheduler ``reload()`` — which runs outside an
+    event loop — can build one cleanup job per watcher. Cleanup runs for every
+    watcher regardless of enabled state, so a disabled watcher's stored feed is
+    still trimmed. Returns an empty list if the DB file does not exist yet.
+    """
+    if not _WATCHERS_DB_PATH.exists():
+        return []
+    try:
+        conn = sqlite3.connect(_WATCHERS_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT id, cleanup_interval_sec FROM watchers"
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        return []
+    return [
+        {"id": r["id"], "cleanup_interval_sec": int(r["cleanup_interval_sec"])}
+        for r in rows
+    ]

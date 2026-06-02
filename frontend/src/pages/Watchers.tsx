@@ -27,7 +27,7 @@ const SEVERITIES: WatcherSeverity[] = ['low', 'medium', 'high', 'critical']
 const DATASETS: WatcherDataset[] = ['all', 'raw', 'normalized']
 const MODES: WatcherMode[] = ['realtime', 'scheduled']
 const FORMATS: WatcherFormat[] = ['json', 'csv', 'xml']
-const MATCH_TYPES: WatcherMatchType[] = ['exact', 'wildcard', 'regex', 'gte', 'lte']
+const MATCH_TYPES: WatcherMatchType[] = ['exact', 'wildcard', 'contains', 'regex', 'gte', 'lte']
 const PUBLISH_TARGETS: WatcherPublishTarget[] = ['local', 'webhook', 'http']
 const PUBLISH_TARGET_LABELS: Record<WatcherPublishTarget, string> = {
   local: 'Local URL feed',
@@ -58,14 +58,37 @@ function detectWebhookFormat(url: string | null | undefined): WatcherWebhookForm
 const MATCH_TYPE_LABELS: Record<WatcherMatchType, string> = {
   exact: 'exact',
   wildcard: 'wildcard',
+  contains: 'contains',
   regex: 'regex',
   gte: '≥ (numeric)',
   lte: '≤ (numeric)',
 }
 
+/** Build the Activity-tab "Publish" cell label for a watcher: the publish
+ *  target, plus the webhook format when publishing to a webhook. */
+function watcherPublishLabel(w: {
+  publish_target: WatcherPublishTarget
+  webhook_format?: WatcherWebhookFormat
+}): string {
+  const base = PUBLISH_TARGET_LABELS[w.publish_target]
+  if (w.publish_target === 'webhook') {
+    return `${base} · ${WEBHOOK_FORMAT_LABELS[w.webhook_format ?? 'generic']}`
+  }
+  return base
+}
+
+// Match types whose comparison honours the per-condition case-sensitive flag.
+const CASE_AWARE_MATCH_TYPES: ReadonlySet<WatcherMatchType> = new Set<WatcherMatchType>([
+  'exact',
+  'wildcard',
+  'contains',
+])
+
 const MAX_FEED_MIN = 1
 const MAX_FEED_MAX = 100_000
 const INTERVAL_MIN = 10
+const CLEANUP_INTERVAL_MIN = 10
+const CLEANUP_INTERVAL_MAX = 86_400
 
 function feedUrl(id: string): string {
   const prefix = getAppBasePrefix()
@@ -523,6 +546,7 @@ const EMPTY: WatcherInput = {
   interval_sec: 120,
   format: 'json',
   max_feed_events: 10,
+  cleanup_interval_sec: 60,
   enabled: false,
   publish_target: 'local',
   webhook_url: null,
@@ -557,6 +581,7 @@ function WatcherForm({
             interval_sec: editing.interval_sec,
             format: editing.format,
             max_feed_events: editing.max_feed_events,
+            cleanup_interval_sec: editing.cleanup_interval_sec ?? 60,
             enabled: editing.enabled,
             publish_target: editing.publish_target,
             webhook_url: editing.webhook_url,
@@ -603,6 +628,9 @@ function WatcherForm({
 
   const validInterval = form.mode !== 'scheduled' || form.interval_sec >= INTERVAL_MIN
   const validMax = form.max_feed_events >= MAX_FEED_MIN && form.max_feed_events <= MAX_FEED_MAX
+  const validCleanup =
+    form.cleanup_interval_sec >= CLEANUP_INTERVAL_MIN &&
+    form.cleanup_interval_sec <= CLEANUP_INTERVAL_MAX
   const hasCondition = form.conditions.length > 0
   const numericConditionsValid = form.conditions.every(
     (c) =>
@@ -620,6 +648,7 @@ function WatcherForm({
     !nameTaken &&
     validInterval &&
     validMax &&
+    validCleanup &&
     hasCondition &&
     numericConditionsValid &&
     validUrl &&
@@ -724,6 +753,20 @@ function WatcherForm({
             onChange={(e) => set('max_feed_events', Number(e.target.value))}
           />
         </label>
+        <label className="space-y-1">
+          <span className="text-xs text-gray-400">Cleanup interval (seconds)</span>
+          <input
+            type="number"
+            min={CLEANUP_INTERVAL_MIN}
+            max={CLEANUP_INTERVAL_MAX}
+            className="input w-full tabular-nums"
+            value={form.cleanup_interval_sec}
+            onChange={(e) => set('cleanup_interval_sec', Number(e.target.value))}
+          />
+          <span className="text-[11px] text-gray-500">
+            How often the feed is trimmed back down to “Max feed events”.
+          </span>
+        </label>
       </div>
 
       {/* Feeds multiselect */}
@@ -788,6 +831,19 @@ function WatcherForm({
               value={c.value}
               onChange={(e) => updateCondition(i, { value: e.target.value })}
             />
+            {CASE_AWARE_MATCH_TYPES.has(c.match_type) && (
+              <label
+                className="flex items-center gap-1 text-[11px] text-gray-400 whitespace-nowrap"
+                title="Match this condition case-sensitively"
+              >
+                <input
+                  type="checkbox"
+                  checked={c.case_sensitive ?? false}
+                  onChange={(e) => updateCondition(i, { case_sensitive: e.target.checked })}
+                />
+                Aa
+              </label>
+            )}
             <button className="text-gray-500 hover:text-red-400" onClick={() => removeCondition(i)}>
               <Trash2 className="w-4 h-4" />
             </button>
@@ -965,6 +1021,8 @@ function ActivityTab() {
   if (!watchers || watchers.length === 0)
     return <p className="text-sm text-gray-500">No watchers yet.</p>
 
+  const selectedWatcher = watchers.find((w) => w.id === selected)
+  const publishLabel = selectedWatcher ? watcherPublishLabel(selectedWatcher) : '—'
   const total = data?.total ?? 0
   const maxPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1)
 
@@ -999,6 +1057,7 @@ function ActivityTab() {
                   <th className="py-2 pr-4">Triggered</th>
                   <th className="py-2 pr-4">Dataset</th>
                   <th className="py-2 pr-4">Source</th>
+                  <th className="py-2 pr-4">Publish</th>
                   <th className="py-2 pr-4">Delivery</th>
                   <th className="py-2 pr-4">Event</th>
                 </tr>
@@ -1009,6 +1068,7 @@ function ActivityTab() {
                     <td className="py-2 pr-4 whitespace-nowrap text-gray-400">{ev.triggered_at}</td>
                     <td className="py-2 pr-4 text-gray-400">{ev.dataset}</td>
                     <td className="py-2 pr-4 text-gray-400">{ev.source_name ?? '—'}</td>
+                    <td className="py-2 pr-4 whitespace-nowrap text-gray-400">{publishLabel}</td>
                     <td className="py-2 pr-4 whitespace-nowrap">
                       <DeliveryCell ev={ev} />
                     </td>

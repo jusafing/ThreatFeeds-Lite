@@ -60,14 +60,29 @@ def _field_token(field: str) -> str:
     return (field or "").strip().lower()
 
 
-def _condition_value_matches(target: str, value: str, match_type: str) -> bool:
-    """Return whether a single string ``target`` satisfies one condition."""
+def _condition_value_matches(
+    target: str, value: str, match_type: str, case_sensitive: bool = False
+) -> bool:
+    """Return whether a single string ``target`` satisfies one condition.
+
+    ``case_sensitive`` only affects the string match types (exact / wildcard /
+    contains). For ``regex`` the caller controls case via inline flags, and the
+    numeric comparisons are case-agnostic, so both ignore the flag.
+    """
     if len(target) > _MAX_MATCH_LEN:
         target = target[:_MAX_MATCH_LEN]
     if match_type == "exact":
+        if case_sensitive:
+            return target == value
         return target.casefold() == value.casefold()
+    if match_type == "contains":
+        if case_sensitive:
+            return value in target
+        return value.casefold() in target.casefold()
     if match_type == "wildcard":
-        return fnmatch.fnmatch(target.casefold(), value.casefold())
+        if case_sensitive:
+            return fnmatch.fnmatchcase(target, value)
+        return fnmatch.fnmatchcase(target.casefold(), value.casefold())
     if match_type == "regex":
         try:
             return re.search(value, target) is not None
@@ -85,24 +100,25 @@ def _condition_value_matches(target: str, value: str, match_type: str) -> bool:
     return False
 
 
-def _row_matches_condition(row: dict[str, Any], cond: dict[str, str]) -> bool:
+def _row_matches_condition(row: dict[str, Any], cond: dict[str, Any]) -> bool:
     """Return whether ``row`` satisfies one field condition."""
     field = _field_token(cond.get("field", ""))
     value = cond.get("value", "")
     match_type = cond.get("match_type", "exact")
+    case_sensitive = bool(cond.get("case_sensitive", False))
     if field in _ANY_FIELD_TOKENS:
         # Match if ANY real data field in the row satisfies the condition.
         # Internal serialization columns are skipped (see _HIDDEN_MATCH_KEYS).
         for key, v in row.items():
             if key in _HIDDEN_MATCH_KEYS or v is None:
                 continue
-            if _condition_value_matches(str(v), value, match_type):
+            if _condition_value_matches(str(v), value, match_type, case_sensitive):
                 return True
         return False
     raw = row.get(field)
     if raw is None:
         return False
-    return _condition_value_matches(str(raw), value, match_type)
+    return _condition_value_matches(str(raw), value, match_type, case_sensitive)
 
 
 def row_matches(row: dict[str, Any], watcher: dict[str, Any]) -> bool:

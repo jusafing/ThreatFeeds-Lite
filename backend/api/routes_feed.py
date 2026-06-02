@@ -8,8 +8,10 @@ guards ``/api/``) leaves it reachable without a session — feed clients connect
 to it like any other syndication feed.
 
 Output is rendered on the fly from the stored ``watcher_events`` table (capped at
-the watcher's ``max_feed_events``); nothing is written to disk. Each rendered
-event carries the trigger timestamp, the watcher name, and all event fields.
+the global ``watcher_max_events`` hard limit); nothing is written to disk. A
+per-watcher periodic job trims stored events down to ``max_feed_events`` between
+bursts (issue_local_008). Each rendered event carries the trigger timestamp, the
+watcher name, and all event fields.
 """
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ from xml.sax.saxutils import escape
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
+from backend.config.loader import load_watcher_max_events
 from backend.db import watchers as store
 
 router = APIRouter(prefix="/feed", tags=["feed"])
@@ -116,7 +119,11 @@ async def watcher_feed(watcher_id: str, request: Request) -> Response:
     watcher = await store.get_watcher(watcher_id)
     if watcher is None:
         raise HTTPException(status_code=404, detail="watcher not found")
-    limit = int(watcher.get("max_feed_events", 10) or 10)
+    # Render up to the global hard limit (watcher_max_events). The per-watcher
+    # max_feed_events governs the *periodic cleanup* floor, not the live feed
+    # ceiling, so a burst of triggers is fully visible until the next cleanup
+    # tick trims it back (issue_local_008).
+    limit = int(load_watcher_max_events())
     rows = await store.list_events(watcher_id, limit=limit)
     fmt = str(watcher.get("format", "json") or "json").lower()
     name = watcher.get("name", watcher_id)

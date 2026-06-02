@@ -283,6 +283,37 @@ def test_public_feed_empty_is_ok(client):
     assert r.json()["count"] == 0
 
 
+def test_public_feed_serves_beyond_max_feed_events_until_cleanup(client):
+    """issue_local_008: the live feed renders up to the global hard limit, not
+    the per-watcher max_feed_events; the periodic cleanup trims it back."""
+    import anyio
+
+    async def _seed():
+        await store.create_watcher(_payload(format="json", max_feed_events=1))
+        await store.record_triggers(
+            "critical-cves",
+            [
+                {"dataset": "normalized", "source_entry_id": i, "source_name": "feed-a",
+                 "event": {"id": i, "cve_id": f"CVE-2024-{i}"}}
+                for i in range(1, 4)
+            ],
+            max_events=1000,
+        )
+
+    anyio.run(_seed)
+    # All 3 are visible despite max_feed_events=1.
+    assert client.get("/feed/watcher/critical-cves/").json()["count"] == 3
+
+    # After a cleanup pass the feed is trimmed to max_feed_events (1 newest).
+    async def _cleanup():
+        await store.run_watcher_cleanup("critical-cves")
+
+    anyio.run(_cleanup)
+    body = client.get("/feed/watcher/critical-cves/").json()
+    assert body["count"] == 1
+    assert body["events"][0]["cve_id"] == "CVE-2024-3"
+
+
 def test_feed_is_public_but_admin_routes_gated_when_auth_enabled(client, monkeypatch):
     # Turn auth ON for the middleware (no session cookie supplied).
     monkeypatch.setattr(main_mod, "load_auth_enabled", lambda: True)

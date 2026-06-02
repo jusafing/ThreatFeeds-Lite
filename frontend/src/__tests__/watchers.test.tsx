@@ -45,6 +45,7 @@ function watcher(over: Partial<Watcher> = {}): Watcher {
     interval_sec: 120,
     format: 'json',
     max_feed_events: 10,
+    cleanup_interval_sec: 60,
     enabled: true,
     publish_target: 'local',
     webhook_url: null,
@@ -339,5 +340,87 @@ describe('Watchers page (issue_local_007)', () => {
     expect(
       screen.getByText('https://discord.com/api/webhooks/1/abc'),
     ).toBeInTheDocument()
+  })
+})
+
+describe('Watchers page (issue_local_008)', () => {
+  it('sends a contains condition with a case-sensitive flag', async () => {
+    vi.mocked(api.watchers.list).mockResolvedValue([])
+    vi.mocked(api.watchers.create).mockResolvedValue(watcher())
+    renderPage()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Configuration' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Add Watcher/i }))
+
+    const nameLabel = await screen.findByText('Name')
+    const input = nameLabel.parentElement!.querySelector('input')!
+    fireEvent.change(input, { target: { value: 'Contains W' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /Add condition/i }))
+    // Select the new "contains" match type.
+    const matchSelect = screen.getByDisplayValue('exact')
+    fireEvent.change(matchSelect, { target: { value: 'contains' } })
+    fireEvent.change(screen.getByPlaceholderText('value'), { target: { value: 'rce' } })
+    // The case-sensitive checkbox is only shown for string match types.
+    const caseBox = screen.getByRole('checkbox')
+    fireEvent.click(caseBox)
+
+    fireEvent.click(screen.getByRole('button', { name: /Create watcher/i }))
+    await waitFor(() => expect(api.watchers.create).toHaveBeenCalled())
+    const payload = vi.mocked(api.watchers.create).mock.calls[0][0]
+    expect(payload.conditions[0].match_type).toBe('contains')
+    expect(payload.conditions[0].case_sensitive).toBe(true)
+  })
+
+  it('sends a cleanup interval when creating a watcher', async () => {
+    vi.mocked(api.watchers.list).mockResolvedValue([])
+    vi.mocked(api.watchers.create).mockResolvedValue(watcher())
+    renderPage()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Configuration' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Add Watcher/i }))
+
+    const nameLabel = await screen.findByText('Name')
+    const input = nameLabel.parentElement!.querySelector('input')!
+    fireEvent.change(input, { target: { value: 'Cleanup W' } })
+    fireEvent.click(screen.getByRole('button', { name: /Add condition/i }))
+    fireEvent.change(screen.getByPlaceholderText('value'), { target: { value: 'x' } })
+
+    const cleanupLabel = await screen.findByText('Cleanup interval (seconds)')
+    const cleanupInput = cleanupLabel.parentElement!.querySelector('input')!
+    fireEvent.change(cleanupInput, { target: { value: '120' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /Create watcher/i }))
+    await waitFor(() => expect(api.watchers.create).toHaveBeenCalled())
+    expect(vi.mocked(api.watchers.create).mock.calls[0][0].cleanup_interval_sec).toBe(120)
+  })
+
+  it('shows a Publish column on the Activity tab reflecting the watcher target', async () => {
+    vi.mocked(api.watchers.list).mockResolvedValue([
+      watcher({ publish_target: 'webhook', webhook_format: 'discord' }),
+    ])
+    vi.mocked(api.watchers.events).mockResolvedValue({
+      events: [
+        {
+          id: 1,
+          watcher_id: 'critical-cves',
+          dataset: 'normalized',
+          source_entry_id: 1,
+          source_name: 'feed-a',
+          triggered_at: '2024-01-01T00:00:00Z',
+          event: { cve_id: 'CVE-2024-1' },
+          delivery_status: 'ok',
+          delivery_error: null,
+          delivery_detail: null,
+          delivered_at: '2024-01-01T00:00:01Z',
+        },
+      ],
+      total: 1,
+    })
+    renderPage()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
+    expect(await screen.findByRole('columnheader', { name: 'Publish' })).toBeInTheDocument()
+    expect(await screen.findByText(/Webhook · Discord/)).toBeInTheDocument()
   })
 })

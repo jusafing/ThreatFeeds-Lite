@@ -10,7 +10,8 @@ class WatcherCondition(BaseModel):
     """One field-match condition. ``field`` empty/'*' means match any field."""
     field: str = ""
     value: str
-    match_type: str = "exact"  # exact | wildcard | regex | gte | lte
+    match_type: str = "exact"  # exact | wildcard | regex | gte | lte | contains
+    case_sensitive: bool = False
 
 
 class WatcherIn(BaseModel):
@@ -26,6 +27,7 @@ class WatcherIn(BaseModel):
     interval_sec: int = 120
     format: str = "json"             # json | csv | xml
     max_feed_events: int = 10
+    cleanup_interval_sec: int = 60
     enabled: bool = False
     publish_target: str = "local"    # local | webhook | http
     webhook_url: Optional[str] = None
@@ -53,6 +55,7 @@ class WatcherOut(BaseModel):
     interval_sec: int
     format: str
     max_feed_events: int
+    cleanup_interval_sec: int = 60
     enabled: bool
     trigger_count: int
     created_at: str

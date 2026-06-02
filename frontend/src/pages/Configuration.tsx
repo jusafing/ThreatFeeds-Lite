@@ -378,8 +378,10 @@ function WatcherMaxEventsSetting() {
       <div>
         <p className="text-sm text-gray-300">Watchers — Stored Events Max</p>
         <p className="text-xs text-gray-500">
-          The maximum number of triggered events stored (and served on the public
-          feed) per watcher. Older events beyond this cap are pruned. Range{' '}
+          Global hard limit on triggered events stored per watcher. Newly
+          triggered events are kept up to this cap so a delivery backlog is never
+          lost; each watcher’s own “Max feed events” then trims its public feed
+          back down on its cleanup interval. Range{' '}
           {WATCHER_MAX_EVENTS_MIN.toLocaleString()}–
           {WATCHER_MAX_EVENTS_MAX.toLocaleString()}. Default 1,000. Takes effect
           on the next watcher evaluation (no restart).

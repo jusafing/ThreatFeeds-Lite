@@ -9,9 +9,12 @@ independently of) the public ``/feed/watcher/<id>/`` URL:
         - ``generic`` — the ThreatFeeds envelope
               {"watcher", "watcher_id", "dataset", "source_name",
                "triggered_at", "event": {...}}
-        - ``discord`` — Discord webhook ``{"content": "<summary>"}``
-        - ``slack``   — Slack / Mattermost incoming webhook ``{"text": "<summary>"}``
-        - ``teams``   — Microsoft Teams legacy MessageCard connector payload
+        - ``discord`` — Discord webhook: a ``content`` summary plus an embed
+              code block listing every event field.
+        - ``slack``   — Slack / Mattermost incoming webhook ``{"text": ...}``
+              with a summary plus a code block listing every event field.
+        - ``teams``   — Microsoft Teams legacy MessageCard whose section facts
+              list every event field.
 
   * ``http`` — POST the *bare* event JSON object per event, i.e. the same shape
     the local ``/api/ingest/listener`` endpoint accepts, so one ThreatFeeds-Lite
@@ -45,8 +48,57 @@ _DELIVERY_TIMEOUT = 15.0
 _MAX_DELIVER_PER_PASS = 500
 # Discord hard-caps message content at 2000 characters.
 _DISCORD_CONTENT_MAX = 2000
+# Discord embed description hard cap.
+_DISCORD_EMBED_DESC_MAX = 4096
+# Slack / Mattermost text soft cap (their hard limit is larger; stay well under).
+_SLACK_TEXT_MAX = 3500
 # Cap on the response body captured in an error detail blob.
 _DETAIL_BODY_MAX = 2000
+# Per-value truncation when rendering all event fields into a chat message.
+_EVENT_VALUE_MAX = 500
+# Max number of MessageCard facts rendered for Teams before an overflow note.
+_TEAMS_MAX_FACTS = 25
+
+# Internal/serialization keys that are not real data fields and are skipped when
+# rendering all event fields into a chat message (mirrors the engine's hidden
+# match keys so the chat body shows the same fields a user can match on).
+_INTERNAL_EVENT_KEYS = frozenset(
+    {"dedup_key", "normalized", "extra", "extra_norm", "raw"}
+)
+
+
+def _event_lines(event: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return ``(key, value)`` pairs for every real event field.
+
+    Internal serialization keys are skipped and None/empty values dropped. Each
+    value is stringified and per-value truncated so one huge field cannot blow
+    past a receiver's message-size limit.
+    """
+    pairs: list[tuple[str, str]] = []
+    for key, value in event.items():
+        if key in _INTERNAL_EVENT_KEYS or value is None:
+            continue
+        text = value if isinstance(value, str) else str(value)
+        if text == "":
+            continue
+        if len(text) > _EVENT_VALUE_MAX:
+            text = text[: _EVENT_VALUE_MAX - 1] + "…"
+        pairs.append((str(key), text))
+    return pairs
+
+
+def _event_block(event: dict[str, Any], max_len: int) -> str:
+    """Render event fields as ``key: value`` lines, bounded by ``max_len``."""
+    lines: list[str] = []
+    used = 0
+    for key, text in _event_lines(event):
+        line = f"{key}: {text}"
+        if used + len(line) + 1 > max_len:
+            lines.append("…")
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
 
 
 def _summarize(watcher: dict[str, Any], event_row: dict[str, Any]) -> str:
@@ -86,20 +138,43 @@ def _build_payload(watcher: dict[str, Any], event_row: dict[str, Any]) -> dict[s
         return event
 
     fmt = str(watcher.get("webhook_format") or "generic")
+    event = event_row.get("event") or {}
+    summary = _summarize(watcher, event_row)
     if fmt == "discord":
-        return {"content": _summarize(watcher, event_row)[:_DISCORD_CONTENT_MAX]}
+        # Summary as the message content + an embed code block carrying every
+        # event field so the receiver sees the full record, not just the title.
+        block = _event_block(event, _DISCORD_EMBED_DESC_MAX - 8)
+        payload: dict[str, Any] = {"content": summary[:_DISCORD_CONTENT_MAX]}
+        if block:
+            payload["embeds"] = [{
+                "title": (watcher.get("name") or watcher.get("id") or "event")[:256],
+                "description": f"```\n{block}\n```"[:_DISCORD_EMBED_DESC_MAX],
+            }]
+        return payload
     if fmt == "slack":
         # Slack and Mattermost both accept {"text": ...} on incoming webhooks.
-        return {"text": _summarize(watcher, event_row)}
+        block = _event_block(event, _SLACK_TEXT_MAX - len(summary) - 12)
+        text = summary if not block else f"{summary}\n```\n{block}\n```"
+        return {"text": text[:_SLACK_TEXT_MAX]}
     if fmt == "teams":
         # Legacy Office 365 connector MessageCard. Newer Teams Workflows expect
         # an Adaptive Card; this best-effort card works with classic connectors.
-        return {
+        pairs = _event_lines(event)
+        facts = [{"name": k, "value": v} for k, v in pairs[:_TEAMS_MAX_FACTS]]
+        if len(pairs) > _TEAMS_MAX_FACTS:
+            facts.append({
+                "name": "…",
+                "value": f"+{len(pairs) - _TEAMS_MAX_FACTS} more field(s)",
+            })
+        card: dict[str, Any] = {
             "@type": "MessageCard",
             "@context": "https://schema.org/extensions",
-            "summary": _summarize(watcher, event_row),
-            "text": _summarize(watcher, event_row),
+            "summary": summary,
+            "text": summary,
         }
+        if facts:
+            card["sections"] = [{"facts": facts}]
+        return card
 
     # Default generic envelope.
     return {

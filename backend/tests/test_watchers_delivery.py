@@ -225,8 +225,52 @@ async def test_discord_format_sends_content():
         res = await delivery.deliver_pending(await store.get_watcher(w["id"]))
     assert res == {"delivered": 1, "failed": 0}
     body = fake.calls[0]["json"]
-    assert set(body.keys()) == {"content"}
+    # Summary content plus an embed code block carrying every event field.
+    assert set(body.keys()) == {"content", "embeds"}
     assert "Disc W" in body["content"]
+    desc = body["embeds"][0]["description"]
+    assert "cve_id: CVE-2024-1" in desc
+    assert "id: 1" in desc
+
+
+@pytest.mark.asyncio
+async def test_slack_format_includes_all_event_fields():
+    w = await store.create_watcher(
+        _defn(name="Slack F", publish_target="webhook", webhook_format="slack",
+              webhook_url="https://hooks.slack.com/services/x")
+    )
+    await store.record_triggers(
+        w["id"],
+        [{"dataset": "normalized", "source_entry_id": 1, "source_name": "feed-a",
+          "event": {"id": 1, "cve_id": "CVE-2024-9", "severity": "high"}}],
+        max_events=100,
+    )
+    fake = _FakeClient(status_code=200)
+    with _patch_client(fake):
+        await delivery.deliver_pending(await store.get_watcher(w["id"]))
+    text = fake.calls[0]["json"]["text"]
+    assert "cve_id: CVE-2024-9" in text
+    assert "severity: high" in text
+
+
+@pytest.mark.asyncio
+async def test_teams_format_lists_event_fields_as_facts():
+    w = await store.create_watcher(
+        _defn(name="Teams F", publish_target="webhook", webhook_format="teams",
+              webhook_url="https://acme.webhook.office.com/x")
+    )
+    await store.record_triggers(
+        w["id"],
+        [{"dataset": "normalized", "source_entry_id": 1, "source_name": "feed-a",
+          "event": {"id": 1, "cve_id": "CVE-2024-7"}}],
+        max_events=100,
+    )
+    fake = _FakeClient(status_code=200)
+    with _patch_client(fake):
+        await delivery.deliver_pending(await store.get_watcher(w["id"]))
+    body = fake.calls[0]["json"]
+    facts = {f["name"]: f["value"] for f in body["sections"][0]["facts"]}
+    assert facts["cve_id"] == "CVE-2024-7"
 
 
 @pytest.mark.asyncio

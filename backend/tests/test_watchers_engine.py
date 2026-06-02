@@ -128,6 +128,43 @@ def test_numeric_match_handles_floats():
     assert engine.row_matches({"id": 1, "severity": "high", "score": "2.4"}, w) is False
 
 
+def test_contains_match_substring_case_insensitive_by_default():
+    row = {"id": 1, "severity": "high", "title": "Critical RCE in Acme Router"}
+    w = _w(conditions=[{"field": "title", "value": "acme router", "match_type": "contains"}])
+    assert engine.row_matches(row, w) is True
+    w2 = _w(conditions=[{"field": "title", "value": "firewall", "match_type": "contains"}])
+    assert engine.row_matches(row, w2) is False
+
+
+def test_contains_match_case_sensitive():
+    row = {"id": 1, "severity": "high", "title": "Acme Router"}
+    w = _w(conditions=[{"field": "title", "value": "Acme", "match_type": "contains",
+                        "case_sensitive": True}])
+    assert engine.row_matches(row, w) is True
+    w2 = _w(conditions=[{"field": "title", "value": "acme", "match_type": "contains",
+                         "case_sensitive": True}])
+    assert engine.row_matches(row, w2) is False
+
+
+def test_exact_match_case_sensitive_flag():
+    row = {"id": 1, "severity": "high", "country": "Germany"}
+    cs = _w(conditions=[{"field": "country", "value": "germany", "match_type": "exact",
+                         "case_sensitive": True}])
+    assert engine.row_matches(row, cs) is False
+    cs_ok = _w(conditions=[{"field": "country", "value": "Germany", "match_type": "exact",
+                            "case_sensitive": True}])
+    assert engine.row_matches(row, cs_ok) is True
+
+
+def test_wildcard_match_case_sensitive_flag():
+    row = {"id": 1, "severity": "high", "cve_id": "cve-2024-1"}
+    cs = _w(conditions=[{"field": "cve_id", "value": "CVE-2024-*", "match_type": "wildcard",
+                         "case_sensitive": True}])
+    assert engine.row_matches(row, cs) is False
+    ci = _w(conditions=[{"field": "cve_id", "value": "CVE-2024-*", "match_type": "wildcard"}])
+    assert engine.row_matches(row, ci) is True
+
+
 # ── evaluate_watcher integration (monkeypatched candidate fetch) ─────────────
 
 @pytest.mark.asyncio
