@@ -10,8 +10,9 @@
 #   - execution.log    timestamps, per-test status/exit code, and any errors
 #
 # Connection and credentials are read from a .env file (default: ./.env.test,
-# resolved next to this script). The target is given EITHER as host+port OR as a
-# full base URL (url=...), the latter for a domain / reverse proxy / alias path.
+# resolved next to this script). The target is given EITHER as a host (with an
+# optional port, and an optional http://|https:// scheme) OR as a full base URL
+# (url=...), the latter for a domain / reverse proxy / alias path.
 # Push tests use the push account; read/query tests use the read account.
 #
 # Usage:
@@ -112,12 +113,12 @@ missing=""
 [ -n "${PASS_READ}" ] || missing="${missing} pass_read"
 if [ -n "${missing}" ]; then
   echo "Error: ${ENV_FILE} is missing required key(s):${missing}" >&2
-  echo "Expected: a target (url, OR host + port) plus user_push, pass_push, user_read, pass_read" >&2
+  echo "Expected: a target (url, OR host with optional port) plus user_push, pass_push, user_read, pass_read" >&2
   echo "See .env.example for the canonical format." >&2
   exit 1
 fi
 
-# Target: either a full base URL, or host + port.
+# Target: either a full base URL, or host (+ optional port).
 if [ -n "${URL}" ]; then
   case "${URL}" in
     http://*|https://*) ;;
@@ -131,15 +132,31 @@ if [ -n "${URL}" ]; then
   fi
   BASE_URL="${URL%/}"     # strip a trailing slash for clean joins/logs
 else
-  target_missing=""
-  [ -n "${HOST}" ] || target_missing="${target_missing} host"
-  [ -n "${PORT}" ] || target_missing="${target_missing} port"
-  if [ -n "${target_missing}" ]; then
-    echo "Error: no target in ${ENV_FILE}: set 'url', or both host and port (missing:${target_missing})" >&2
+  # host is required; port is OPTIONAL. host may carry its own scheme
+  # (http:// or https://); without one we default to http for backward
+  # compatibility. When no port is given the scheme's default applies
+  # (80 for http, 443 for https) — e.g. host=https://example.com → port 443.
+  if [ -z "${HOST}" ]; then
+    echo "Error: no target in ${ENV_FILE}: set 'url', or 'host' (port optional)" >&2
     echo "See .env.example for the canonical format." >&2
     exit 1
   fi
-  BASE_URL="http://${HOST}:${PORT}"
+  scheme="http://"
+  authority="${HOST}"
+  case "${HOST}" in
+    http://*)  scheme="http://";  authority="${HOST#http://}" ;;
+    https://*) scheme="https://"; authority="${HOST#https://}" ;;
+  esac
+  authority="${authority%/}"          # drop any trailing slash
+  if [ -n "${PORT}" ]; then
+    case "${authority}" in
+      *:[0-9]*)
+        echo "Warning: 'host' already includes a port; ignoring the separate 'port=${PORT}'." >&2 ;;
+      *)
+        authority="${authority}:${PORT}" ;;
+    esac
+  fi
+  BASE_URL="${scheme}${authority}"
 fi
 
 # TLS verification: enabled by default. A truthy skip_tls_verify in the env file

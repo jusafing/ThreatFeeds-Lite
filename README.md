@@ -393,8 +393,9 @@ in (it is read from `scripts/client_tests_demo/.env.test` by default):
 ```bash
 cp scripts/client_tests_demo/.env.example scripts/client_tests_demo/.env.test
 # then edit .env.test:
-#   host / port            — plain-HTTP target (http://host:port), OR
-#   url                    — full base URL incl. scheme (https / reverse-proxy alias);
+#   host [+ port]          — target host; port is OPTIONAL (defaults: 80 http / 443 https).
+#                            host may include a scheme (https://host); bare host -> http. OR
+#   url                    — full base URL incl. scheme (reverse-proxy alias / path prefix);
 #                            wins over host/port, must include http:// or https://
 #   skip_tls_verify=true   — accept self-signed/untrusted TLS (insecure; or use -k)
 #   user_push / pass_push  — account used to push events (T1; a sender or admin)

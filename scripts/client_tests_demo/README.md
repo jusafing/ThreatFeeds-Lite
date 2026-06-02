@@ -43,12 +43,22 @@ Real `.env*` files are **gitignored** — only `.env.example` is committed.
 
 You can point the runner at the server in one of two ways:
 
-- **`host` + `port`** — plain HTTP to `http://host:port` (the default above).
-- **`url`** — a full base URL **including the scheme**. Use this for HTTPS or
-  when the server is behind a reverse proxy / path prefix (an alias), e.g.:
+- **`host`** (with an optional **`port`**) — `port` is optional: when omitted the
+  scheme's default port applies (`80` for http, `443` for https). `host` may also
+  carry a scheme; without one it defaults to `http://`. Examples:
 
   ```
-  url=https://threats.example.com
+  host=192.0.2.10                          # + port=8001 -> http://192.0.2.10:8001
+  host=threats.example.com                 # no port     -> http://threats.example.com (80)
+  host=https://threats.example.com         # no port     -> https://threats.example.com (443)
+  host=https://threats.example.com         # + port=8443 -> https://threats.example.com:8443
+  ```
+
+  (If `host` already embeds a port, a separate `port=` is ignored with a warning.)
+- **`url`** — a full base URL **including the scheme**. Use this when the server
+  is behind a reverse proxy / path prefix (an alias), e.g.:
+
+  ```
   url=https://proxy.example.com/threatfeeds   # reverse-proxy alias
   ```
 
