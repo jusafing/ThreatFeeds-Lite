@@ -373,7 +373,7 @@ function ConfigTab() {
                     ? w.conditions
                         .map((c) => `${c.field || '*'} ${c.match_type} "${c.value}"`)
                         .join(' AND ')
-                    : 'none (severity only)'}
+                    : 'none'}
                 </p>
                 <p>Format: {w.format.toUpperCase()} · Max events: {w.max_feed_events}</p>
                 <FeedLink id={w.id} />
@@ -523,12 +523,16 @@ function WatcherForm({
           />
         </label>
         <label className="space-y-1">
-          <span className="text-xs text-gray-400">Severity</span>
+          <span className="text-xs text-gray-400">Severity (label)</span>
           <select className="input w-full" value={form.severity} onChange={(e) => set('severity', e.target.value as WatcherSeverity)}>
             {SEVERITIES.map((s) => (
               <option key={s} value={s}>{s}</option>
             ))}
           </select>
+          <span className="text-[11px] text-gray-500">
+            Classification label only — does not affect matching. To match on
+            severity, add a condition with field “severity”.
+          </span>
         </label>
         <label className="space-y-1">
           <span className="text-xs text-gray-400">Dataset</span>

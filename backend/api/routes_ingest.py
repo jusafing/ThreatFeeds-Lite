@@ -83,6 +83,22 @@ async def _first_ingest(source_name: str) -> bool:
         return True
 
 
+def _trigger_watchers(result: dict[str, Any]) -> dict[str, Any]:
+    """Fire realtime watchers for a *synchronous* ingest result.
+
+    The background-job path triggers watchers via JobStore.complete(); the
+    synchronous routes return without a job, so they must invoke the shared
+    engine hook themselves (issue_local_006 review_02). Best-effort and
+    non-blocking. Returns ``result`` unchanged for call-site convenience.
+    """
+    try:
+        from backend.watchers.engine import schedule_realtime_ingest_eval
+        schedule_realtime_ingest_eval(int(result.get("inserted", 0) or 0))
+    except Exception:  # pragma: no cover — never break ingestion on a hook error
+        pass
+    return result
+
+
 class PushPayload(BaseModel):
     model_config = {"extra": "allow"}
     source: str
@@ -127,7 +143,7 @@ async def listener_ingest(
         job = job_store.create(source_name, "push", first_ingest=True)
         background_tasks.add_task(_run_push_job, job.id, payload, source_name)
         return {"job_id": job.id}
-    result = await process_push(payload, source_name)
+    result = _trigger_watchers(await process_push(payload, source_name))
     return IngestResponse(**result)
 
 
@@ -144,7 +160,7 @@ async def push_ingest(
         job = job_store.create(source_name, "push", first_ingest=first)
         background_tasks.add_task(_run_push_job, job.id, payload, source_name)
         return {"job_id": job.id}
-    result = await process_push(payload, source_name)
+    result = _trigger_watchers(await process_push(payload, source_name))
     return IngestResponse(**result)
 
 
@@ -161,7 +177,7 @@ async def push_ingest_batch(
         job = job_store.create(source_name, "push", first_ingest=first)
         background_tasks.add_task(_run_push_job, job.id, payload, source_name)
         return {"job_id": job.id}
-    result = await process_push(payload, source_name)
+    result = _trigger_watchers(await process_push(payload, source_name))
     return IngestResponse(**result)
 
 
@@ -191,6 +207,7 @@ async def local_feed_ingest(
         )
         return {"job_id": job.id}
     result = await ingest_local_feed(raw_bytes, source_name, filename=file.filename)
+    _trigger_watchers(result)
     return IngestResponse(**{k: v for k, v in result.items() if k != "format"})
 
 
@@ -226,6 +243,7 @@ async def confirm_local_preview(
     result = await confirm_preview(preview_id)
     if result is None:
         raise HTTPException(status_code=404, detail=f"Preview '{preview_id}' not found or expired")
+    _trigger_watchers(result)
     return IngestResponse(**{k: v for k, v in result.items() if k != "format"})
 
 
@@ -237,4 +255,5 @@ class RemoteIngestRequest(BaseModel):
 async def remote_feed_ingest(source_name: str, body: RemoteIngestRequest) -> IngestResponse:
     """Fetch a remote feed file by URL (JSON, NDJSON, CSV, XML) and ingest its contents."""
     result = await ingest_remote_feed(body.url, source_name)
+    _trigger_watchers(result)
     return IngestResponse(**{k: v for k, v in result.items() if k != "format"})

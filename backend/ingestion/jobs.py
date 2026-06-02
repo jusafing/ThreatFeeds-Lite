@@ -212,22 +212,15 @@ class JobStore:
         """Evaluate realtime watchers against the raw dataset when this job
         actually indexed new events.
 
-        Lazy-imports the watcher engine to avoid an import cycle, and runs the
-        evaluation as a background task so the synchronous completion path is
-        not blocked. No-op when nothing was inserted or when not inside an event
-        loop (e.g. sync unit tests).
+        Delegates to the shared engine hook so the background-job path and the
+        synchronous ingest routes trigger watchers identically. No-op when
+        nothing was inserted or when not inside an event loop.
         """
-        if int(job.counters.get("inserted", 0) or 0) <= 0:
-            return
         try:
-            from backend.watchers.engine import run_watchers  # noqa: WPS433
+            from backend.watchers.engine import schedule_realtime_ingest_eval  # noqa: WPS433
         except Exception:  # pragma: no cover — defensive
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(run_watchers("ingest", {"raw"}))
+        schedule_realtime_ingest_eval(int(job.counters.get("inserted", 0) or 0))
 
     # ── Maintenance ──────────────────────────────────────────────────────────
 

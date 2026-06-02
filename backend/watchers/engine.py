@@ -21,6 +21,7 @@ Triggering is invoked from three places (see callers):
 """
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import logging
 import re
@@ -94,17 +95,19 @@ def _row_matches_condition(row: dict[str, Any], cond: dict[str, str]) -> bool:
 
 
 def row_matches(row: dict[str, Any], watcher: dict[str, Any]) -> bool:
-    """Return whether ``row`` matches a watcher's severity, feeds, and the AND of
-    its field conditions."""
-    # Severity gate: the event's severity must equal the watcher severity.
-    sev = str(row.get("severity") or "").strip().lower()
-    if sev != str(watcher.get("severity") or "").strip().lower():
-        return False
+    """Return whether ``row`` matches a watcher's feeds and the AND of its field
+    conditions.
+
+    The watcher's ``severity`` is a classification label only and is NOT used to
+    gate matching (issue_local_006 review_02): solely the user-configured
+    conditions (plus the feed scope) decide a trigger. To match on severity,
+    add an explicit condition with ``field="severity"``.
+    """
     # Feed gate: empty feeds == all feeds.
     feeds = watcher.get("feeds") or []
     if feeds and _row_source(row) not in set(feeds):
         return False
-    # Field conditions (AND). No conditions == match anything (within sev/feed).
+    # Field conditions (AND). At least one is always present (validated on save).
     for cond in watcher.get("conditions") or []:
         if not _row_matches_condition(row, cond):
             return False
@@ -237,3 +240,29 @@ async def run_watchers(trigger: str, datasets: set[str] | None = None) -> dict[s
         except Exception as exc:  # pragma: no cover — defensive
             logger.error("watcher %s evaluation failed: %s", watcher.get("id"), exc)
     return {"evaluated": evaluated, "triggered": total}
+
+
+def schedule_realtime_ingest_eval(inserted: int) -> None:
+    """Schedule a realtime watcher pass over the raw dataset after an ingest.
+
+    This is the shared hook used by *all* ingest paths — both the synchronous
+    push/upload routes and the background job runner — so that watchers fire on
+    any new raw events regardless of how they were indexed (issue_local_006
+    review_02: the synchronous API-client push path never reached the job
+    completion hook and so never triggered watchers).
+
+    Non-blocking and best-effort: a no-op when nothing was inserted or when not
+    running inside an event loop (e.g. synchronous unit tests). The evaluation
+    runs as a background task so the calling request is not delayed.
+    """
+    try:
+        if int(inserted or 0) <= 0:
+            return
+    except (TypeError, ValueError):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(run_watchers("ingest", {"raw"}))
+

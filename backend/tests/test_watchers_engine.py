@@ -41,11 +41,14 @@ def _w(**over):
 
 # ── pure match helpers ──────────────────────────────────────────────────────
 
-def test_row_matches_severity_gate():
-    row = {"id": 1, "severity": "low", "source_name": "a"}
-    assert engine.row_matches(row, _w(severity="high")) is False
-    row2 = {"id": 1, "severity": "HIGH", "source_name": "a"}
-    assert engine.row_matches(row2, _w(severity="high")) is True
+def test_row_matches_ignores_watcher_severity():
+    # review_02: watcher severity is a label only — it must NOT gate matching.
+    # A condition is what decides the trigger, regardless of event severity.
+    w = _w(severity="critical", conditions=[{"field": "country", "value": "DE", "match_type": "exact"}])
+    assert engine.row_matches({"id": 1, "severity": "low", "country": "DE", "source_name": "a"}, w) is True
+    assert engine.row_matches({"id": 1, "severity": "critical", "country": "DE", "source_name": "a"}, w) is True
+    # Non-matching condition still blocks regardless of severity.
+    assert engine.row_matches({"id": 1, "severity": "critical", "country": "US", "source_name": "a"}, w) is False
 
 
 def test_row_matches_feed_gate():
@@ -143,11 +146,13 @@ async def test_evaluate_normalized_records_matches(monkeypatch):
     monkeypatch.setattr(engine, "query_entries", _const([]))
 
     n = await engine.evaluate_watcher(await store.get_watcher(watcher["id"]), {"normalized"})
-    assert n == 1
+    # review_02: severity is not a gate, so BOTH DE rows match (id 1 high + id 3
+    # low); only the US row (id 2) is filtered by the country condition.
+    assert n == 2
     events = await store.list_events(watcher["id"])
-    assert len(events) == 1
-    assert events[0]["source_entry_id"] == 1
-    assert events[0]["dataset"] == "normalized"
+    assert len(events) == 2
+    assert {e["source_entry_id"] for e in events} == {1, 3}
+    assert all(e["dataset"] == "normalized" for e in events)
     # High-water advanced to max id seen.
     w = await store.get_watcher(watcher["id"])
     assert w["last_eval_norm_id"] == 3
@@ -219,3 +224,43 @@ def _const(rows):
     async def _fn(*args, **kwargs):
         return list(rows)
     return _fn
+
+
+# ── schedule_realtime_ingest_eval (review_02 sync-ingest hook) ───────────────
+
+@pytest.mark.asyncio
+async def test_schedule_realtime_ingest_eval_runs_on_insert(monkeypatch):
+    import asyncio
+
+    calls: list[tuple] = []
+
+    async def _fake_run(trigger, datasets=None):
+        calls.append((trigger, datasets))
+        return {"evaluated": 0, "triggered": 0}
+
+    monkeypatch.setattr(engine, "run_watchers", _fake_run)
+    engine.schedule_realtime_ingest_eval(2)
+    # Task is scheduled on the running loop; let it run.
+    await asyncio.sleep(0)
+    assert calls == [("ingest", {"raw"})]
+
+
+@pytest.mark.asyncio
+async def test_schedule_realtime_ingest_eval_noop_when_zero(monkeypatch):
+    import asyncio
+
+    calls: list[tuple] = []
+
+    async def _fake_run(trigger, datasets=None):
+        calls.append((trigger, datasets))
+
+    monkeypatch.setattr(engine, "run_watchers", _fake_run)
+    engine.schedule_realtime_ingest_eval(0)
+    engine.schedule_realtime_ingest_eval(None)
+    await asyncio.sleep(0)
+    assert calls == []
+
+
+def test_schedule_realtime_ingest_eval_no_loop_is_safe():
+    # Called outside any event loop (sync context): must not raise.
+    engine.schedule_realtime_ingest_eval(5)
