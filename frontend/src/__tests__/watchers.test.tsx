@@ -48,6 +48,7 @@ function watcher(over: Partial<Watcher> = {}): Watcher {
     enabled: true,
     publish_target: 'local',
     webhook_url: null,
+    webhook_format: 'generic',
     auth_header: null,
     auth_value: null,
     trigger_count: 3,
@@ -56,6 +57,7 @@ function watcher(over: Partial<Watcher> = {}): Watcher {
     last_triggered_at: null,
     delivery_error_count: 0,
     last_delivery_error: null,
+    last_delivery_detail: null,
     ...over,
   }
 }
@@ -281,5 +283,61 @@ describe('Watchers page (issue_local_007)', () => {
     const payload = vi.mocked(api.watchers.create).mock.calls[0][0]
     expect(payload.publish_target).toBe('webhook')
     expect(payload.webhook_url).toBe('https://hook.example/in')
+    expect(payload.webhook_format).toBe('generic')
+  })
+
+  it('shows a webhook format selector and auto-detects Discord from the URL host', async () => {
+    vi.mocked(api.watchers.list).mockResolvedValue([])
+    vi.mocked(api.watchers.create).mockResolvedValue(watcher())
+    renderPage()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Configuration' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Add Watcher/i }))
+
+    const nameLabel = await screen.findByText('Name')
+    const input = nameLabel.parentElement!.querySelector('input')!
+    fireEvent.change(input, { target: { value: 'Disc' } })
+    fireEvent.click(screen.getByRole('button', { name: /Add condition/i }))
+    fireEvent.change(screen.getByPlaceholderText('value'), { target: { value: 'x' } })
+
+    fireEvent.change(screen.getByDisplayValue('Local URL feed'), {
+      target: { value: 'webhook' },
+    })
+
+    // The format selector defaults to Generic, then auto-switches to Discord
+    // once a discord.com URL is entered.
+    expect(await screen.findByDisplayValue(/Generic/)).toBeInTheDocument()
+    const urlInput = screen.getByPlaceholderText('https://example.com/hook')
+    fireEvent.change(urlInput, {
+      target: { value: 'https://discord.com/api/webhooks/1/abc' },
+    })
+    expect(await screen.findByDisplayValue('Discord')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /Create watcher/i }))
+    await waitFor(() => expect(api.watchers.create).toHaveBeenCalled())
+    expect(vi.mocked(api.watchers.create).mock.calls[0][0].webhook_format).toBe('discord')
+  })
+
+  it('opens a delivery-error detail modal from the Summary card', async () => {
+    vi.mocked(api.watchers.list).mockResolvedValue([
+      watcher({
+        delivery_error_count: 1,
+        last_delivery_error: 'HTTP 400',
+        last_delivery_detail: {
+          status: 400,
+          url: 'https://discord.com/api/webhooks/1/abc',
+          body: '{"message": "Cannot send an empty message"}',
+          headers: { 'content-type': 'application/json' },
+        },
+      }),
+    ])
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: /View details/i }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByText(/Cannot send an empty message/)).toBeInTheDocument()
+    expect(
+      screen.getByText('https://discord.com/api/webhooks/1/abc'),
+    ).toBeInTheDocument()
   })
 })

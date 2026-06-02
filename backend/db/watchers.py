@@ -49,7 +49,12 @@ _WATCHERS_DB_PATH = _PROJECT_ROOT / "data" / "watchers.db"
 #   v3 — publish targets (issue_local_007): watchers gain publish_target /
 #        webhook_url / auth_header / auth_value; watcher_events gain per-event
 #        delivery_status / delivery_error / delivered_at.
-_WATCHERS_SCHEMA_VERSION = 3
+#   v4 — webhook formats + rich delivery detail (issue_local_007 review_01):
+#        watchers gain webhook_format (generic|discord|slack|teams); existing
+#        webhook watchers are best-effort backfilled by URL host. watcher_events
+#        gain delivery_detail (JSON: status/headers/body/url) so a failed
+#        delivery can be inspected in a UI card.
+_WATCHERS_SCHEMA_VERSION = 4
 
 # Allowed publish targets for a watcher (issue_local_007).
 #   local   — publish only to the public /feed/watcher/<id>/ URL (default).
@@ -57,6 +62,35 @@ _WATCHERS_SCHEMA_VERSION = 3
 #   http    — POST the bare event JSON to a remote listener (the same shape the
 #             /api/ingest/listener endpoint accepts).
 VALID_PUBLISH_TARGETS: frozenset[str] = frozenset({"local", "webhook", "http"})
+
+# Webhook payload shapes (issue_local_007 review_01). Only meaningful when
+# publish_target == "webhook":
+#   generic — the ThreatFeeds envelope {watcher, watcher_id, ..., event}.
+#   discord — Discord webhook {"content": ...}.
+#   slack   — Slack / Mattermost incoming webhook {"text": ...}.
+#   teams   — Microsoft Teams legacy MessageCard connector payload.
+VALID_WEBHOOK_FORMATS: frozenset[str] = frozenset({"generic", "discord", "slack", "teams"})
+
+# Best-effort mapping of a webhook URL host substring to its format, used both
+# by the v4 backfill migration and (optionally) as a UI default.
+WEBHOOK_HOST_FORMATS: tuple[tuple[str, str], ...] = (
+    ("discord.com", "discord"),
+    ("discordapp.com", "discord"),
+    ("hooks.slack.com", "slack"),
+    ("mattermost", "slack"),
+    ("webhook.office.com", "teams"),
+    ("office.com", "teams"),
+    ("logic.azure.com", "teams"),
+)
+
+
+def detect_webhook_format(url: str | None) -> str:
+    """Return the best-effort webhook format for a URL, or 'generic'."""
+    host = (url or "").lower()
+    for needle, fmt in WEBHOOK_HOST_FORMATS:
+        if needle in host:
+            return fmt
+    return "generic"
 
 VALID_DATASETS: frozenset[str] = frozenset({"all", "raw", "normalized"})
 VALID_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high", "critical"})
@@ -91,6 +125,7 @@ CREATE TABLE IF NOT EXISTS watchers (
     last_eval_norm_id INTEGER NOT NULL DEFAULT 0,
     publish_target   TEXT    NOT NULL DEFAULT 'local',
     webhook_url      TEXT,
+    webhook_format   TEXT    NOT NULL DEFAULT 'generic',
     auth_header      TEXT,
     auth_value       TEXT,
     created_at       TEXT    NOT NULL,
@@ -109,6 +144,7 @@ CREATE TABLE IF NOT EXISTS watcher_events (
     event_json      TEXT    NOT NULL DEFAULT '{}',
     delivery_status TEXT,
     delivery_error  TEXT,
+    delivery_detail TEXT,
     delivered_at    TEXT
 );
 """
@@ -154,7 +190,10 @@ _DELIVERY_AGG_SQL = (
     "AS delivery_error_count, "
     "(SELECT e.delivery_error FROM watcher_events e "
     " WHERE e.watcher_id = watchers.id AND e.delivery_status = 'error' "
-    " ORDER BY e.id DESC LIMIT 1) AS last_delivery_error "
+    " ORDER BY e.id DESC LIMIT 1) AS last_delivery_error, "
+    "(SELECT e.delivery_detail FROM watcher_events e "
+    " WHERE e.watcher_id = watchers.id AND e.delivery_status = 'error' "
+    " ORDER BY e.id DESC LIMIT 1) AS last_delivery_detail "
 )
 
 
@@ -244,6 +283,32 @@ async def _migrate(db: aiosqlite.Connection, from_version: int) -> None:
                 "delivered_at": "TEXT",
             },
         )
+    if from_version < 4:
+        # Webhook formats + rich delivery detail (review_01).
+        await _add_columns_if_missing(
+            db, "watchers",
+            {"webhook_format": "TEXT NOT NULL DEFAULT 'generic'"},
+        )
+        await _add_columns_if_missing(
+            db, "watcher_events",
+            {"delivery_detail": "TEXT"},
+        )
+        # Best-effort backfill: existing webhook watchers stored before formats
+        # existed default to 'generic', which breaks chat receivers (e.g. Discord
+        # rejects the envelope). Infer the format from the URL host so they work
+        # after redeploy + retry without manual reconfiguration.
+        cur = await db.execute(
+            "SELECT id, webhook_url FROM watchers "
+            "WHERE publish_target = 'webhook' AND COALESCE(webhook_format, 'generic') = 'generic'"
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        for wid, url in rows:
+            fmt = detect_webhook_format(url)
+            if fmt != "generic":
+                await db.execute(
+                    "UPDATE watchers SET webhook_format = ? WHERE id = ?", (fmt, wid)
+                )
 
 
 async def _add_columns_if_missing(
@@ -273,6 +338,15 @@ def _row_to_watcher(row: sqlite3.Row | aiosqlite.Row) -> dict[str, Any]:  # type
     except (json.JSONDecodeError, TypeError):
         d["conditions"] = []
     d["enabled"] = bool(d.get("enabled"))
+    if "last_delivery_detail" in d:
+        raw = d.get("last_delivery_detail")
+        if raw:
+            try:
+                d["last_delivery_detail"] = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                d["last_delivery_detail"] = None
+        else:
+            d["last_delivery_detail"] = None
     return d
 
 
@@ -374,12 +448,16 @@ def validate_definition(data: dict[str, Any]) -> dict[str, Any]:
     webhook_url = str(data.get("webhook_url", "") or "").strip()
     auth_header = str(data.get("auth_header", "") or "").strip()
     auth_value = str(data.get("auth_value", "") or "")
+    webhook_format = str(data.get("webhook_format", "generic") or "generic").strip().lower()
+    if webhook_format not in VALID_WEBHOOK_FORMATS:
+        raise ValueError(f"invalid webhook_format: {webhook_format!r}")
     if publish_target == "local":
         # A local-feed watcher has no remote target; clear any URL/auth so they
         # are not silently persisted.
         webhook_url = ""
         auth_header = ""
         auth_value = ""
+        webhook_format = "generic"
     else:
         if not webhook_url:
             raise ValueError("webhook_url is required when publish_target is not 'local'")
@@ -393,6 +471,10 @@ def validate_definition(data: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("auth_header and auth_value must be provided together")
         if len(auth_header) > 200 or len(auth_value) > 2000:
             raise ValueError("auth header name/value too long")
+        # webhook_format only applies to the 'webhook' target; the 'http' target
+        # always sends the bare event JSON, so force generic there.
+        if publish_target != "webhook":
+            webhook_format = "generic"
 
     return {
         "name": name,
@@ -407,6 +489,7 @@ def validate_definition(data: dict[str, Any]) -> dict[str, Any]:
         "enabled": enabled,
         "publish_target": publish_target,
         "webhook_url": webhook_url,
+        "webhook_format": webhook_format,
         "auth_header": auth_header,
         "auth_value": auth_value,
     }
@@ -433,9 +516,9 @@ async def create_watcher(data: dict[str, Any]) -> dict[str, Any]:
                 id, name, severity, dataset, feeds_json, conditions_json,
                 mode, interval_sec, format, max_feed_events, enabled,
                 trigger_count, last_eval_raw_id, last_eval_norm_id,
-                publish_target, webhook_url, auth_header, auth_value,
+                publish_target, webhook_url, webhook_format, auth_header, auth_value,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 wid, fields["name"], fields["severity"], fields["dataset"],
@@ -444,6 +527,7 @@ async def create_watcher(data: dict[str, Any]) -> dict[str, Any]:
                 fields["mode"], fields["interval_sec"], fields["format"],
                 fields["max_feed_events"], int(fields["enabled"]),
                 fields["publish_target"], fields["webhook_url"] or None,
+                fields["webhook_format"],
                 fields["auth_header"] or None, fields["auth_value"] or None,
                 ts, ts,
             ),
@@ -465,7 +549,8 @@ async def update_watcher(watcher_id: str, data: dict[str, Any]) -> dict[str, Any
                 name = ?, severity = ?, dataset = ?, feeds_json = ?,
                 conditions_json = ?, mode = ?, interval_sec = ?, format = ?,
                 max_feed_events = ?, enabled = ?,
-                publish_target = ?, webhook_url = ?, auth_header = ?, auth_value = ?,
+                publish_target = ?, webhook_url = ?, webhook_format = ?,
+                auth_header = ?, auth_value = ?,
                 updated_at = ?
             WHERE id = ?
             """,
@@ -476,6 +561,7 @@ async def update_watcher(watcher_id: str, data: dict[str, Any]) -> dict[str, Any
                 fields["mode"], fields["interval_sec"], fields["format"],
                 fields["max_feed_events"], int(fields["enabled"]),
                 fields["publish_target"], fields["webhook_url"] or None,
+                fields["webhook_format"],
                 fields["auth_header"] or None, fields["auth_value"] or None,
                 ts, watcher_id,
             ),
@@ -684,6 +770,24 @@ async def update_high_water(
         await db.commit()
 
 
+def _decode_event_row(row: aiosqlite.Row) -> dict[str, Any]:  # type: ignore[name-defined]
+    """Convert a watcher_events row to a dict with parsed event + delivery_detail."""
+    d = dict(row)
+    try:
+        d["event"] = json.loads(d.pop("event_json", "{}") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        d["event"] = {}
+    raw_detail = d.get("delivery_detail")
+    if raw_detail:
+        try:
+            d["delivery_detail"] = json.loads(raw_detail)
+        except (json.JSONDecodeError, TypeError):
+            d["delivery_detail"] = None
+    else:
+        d["delivery_detail"] = None
+    return d
+
+
 async def list_events(
     watcher_id: str, limit: int = 100, offset: int = 0
 ) -> list[dict[str, Any]]:
@@ -699,12 +803,7 @@ async def list_events(
             "ORDER BY id DESC LIMIT ? OFFSET ?",
             (watcher_id, limit, offset),
         ):
-            d = dict(row)
-            try:
-                d["event"] = json.loads(d.pop("event_json", "{}") or "{}")
-            except (json.JSONDecodeError, TypeError):
-                d["event"] = {}
-            rows.append(d)
+            rows.append(_decode_event_row(row))
     return rows
 
 
@@ -744,29 +843,35 @@ async def list_pending_deliveries(
             "ORDER BY id DESC LIMIT ?",
             (watcher_id, limit),
         ):
-            d = dict(row)
-            try:
-                d["event"] = json.loads(d.pop("event_json", "{}") or "{}")
-            except (json.JSONDecodeError, TypeError):
-                d["event"] = {}
-            out.append(d)
+            out.append(_decode_event_row(row))
     return out
 
 
 async def update_delivery_status(
-    event_id: int, status: str, error: str | None = None
+    event_id: int,
+    status: str,
+    error: str | None = None,
+    detail: dict[str, Any] | None = None,
 ) -> None:
     """Record the outcome of a delivery attempt for one event row.
 
     ``status`` is ``'ok'`` or ``'error'``. ``delivered_at`` is stamped on every
-    attempt; ``delivery_error`` holds the failure text (cleared on success).
+    attempt; ``delivery_error`` holds the short failure text and
+    ``delivery_detail`` a JSON blob with the full response (status / headers /
+    body / url) for UI inspection. Both are cleared on success.
     """
     await init_watchers_db()
+    if status == "error":
+        error_text = error
+        detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
+    else:
+        error_text = None
+        detail_json = None
     async with aiosqlite.connect(_WATCHERS_DB_PATH) as db:
         await db.execute(
             "UPDATE watcher_events SET delivery_status = ?, delivery_error = ?, "
-            "delivered_at = ? WHERE id = ?",
-            (status, error if status == "error" else None, _now(), int(event_id)),
+            "delivery_detail = ?, delivered_at = ? WHERE id = ?",
+            (status, error_text, detail_json, _now(), int(event_id)),
         )
         await db.commit()
 

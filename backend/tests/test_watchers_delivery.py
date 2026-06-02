@@ -40,8 +40,11 @@ def _defn(**over):
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int):
+    def __init__(self, status_code: int, *, text: str = "", headers: dict | None = None):
         self.status_code = status_code
+        self.text = text
+        self.headers = headers or {}
+        self.reason_phrase = "Bad Request" if status_code == 400 else ""
         self.request = httpx.Request("POST", "https://x.example/in")
 
     def raise_for_status(self) -> None:
@@ -54,9 +57,18 @@ class _FakeResponse:
 class _FakeClient:
     """Records every POST and returns a configured response (or raises)."""
 
-    def __init__(self, status_code: int = 200, raise_exc: Exception | None = None):
+    def __init__(
+        self,
+        status_code: int = 200,
+        raise_exc: Exception | None = None,
+        *,
+        text: str = "",
+        headers: dict | None = None,
+    ):
         self.status_code = status_code
         self.raise_exc = raise_exc
+        self.text = text
+        self.headers = headers
         self.calls: list[dict[str, Any]] = []
 
     async def __aenter__(self) -> "_FakeClient":
@@ -69,7 +81,7 @@ class _FakeClient:
         self.calls.append({"url": url, "json": json, "headers": headers})
         if self.raise_exc is not None:
             raise self.raise_exc
-        return _FakeResponse(self.status_code)
+        return _FakeResponse(self.status_code, text=self.text, headers=self.headers)
 
 
 def _patch_client(fake: _FakeClient):
@@ -199,3 +211,126 @@ async def test_mixed_batch_counts_both_outcomes():
         res2 = await delivery.deliver_pending(await store.get_watcher(w["id"]))
     assert res2 == {"delivered": 3, "failed": 0}
     assert await store.list_pending_deliveries(w["id"]) == []
+
+
+@pytest.mark.asyncio
+async def test_discord_format_sends_content():
+    w = await store.create_watcher(
+        _defn(name="Disc W", publish_target="webhook", webhook_format="discord",
+              webhook_url="https://discord.com/api/webhooks/1/abc")
+    )
+    await _seed(w["id"], n=1)
+    fake = _FakeClient(status_code=204)
+    with _patch_client(fake):
+        res = await delivery.deliver_pending(await store.get_watcher(w["id"]))
+    assert res == {"delivered": 1, "failed": 0}
+    body = fake.calls[0]["json"]
+    assert set(body.keys()) == {"content"}
+    assert "Disc W" in body["content"]
+
+
+@pytest.mark.asyncio
+async def test_slack_format_sends_text():
+    w = await store.create_watcher(
+        _defn(name="Slack W", publish_target="webhook", webhook_format="slack",
+              webhook_url="https://hooks.slack.com/services/x")
+    )
+    await _seed(w["id"], n=1)
+    fake = _FakeClient(status_code=200)
+    with _patch_client(fake):
+        await delivery.deliver_pending(await store.get_watcher(w["id"]))
+    body = fake.calls[0]["json"]
+    assert set(body.keys()) == {"text"}
+    assert "Slack W" in body["text"]
+
+
+@pytest.mark.asyncio
+async def test_teams_format_sends_messagecard():
+    w = await store.create_watcher(
+        _defn(name="Teams W", publish_target="webhook", webhook_format="teams",
+              webhook_url="https://acme.webhook.office.com/x")
+    )
+    await _seed(w["id"], n=1)
+    fake = _FakeClient(status_code=200)
+    with _patch_client(fake):
+        await delivery.deliver_pending(await store.get_watcher(w["id"]))
+    body = fake.calls[0]["json"]
+    assert body["@type"] == "MessageCard"
+    assert "Teams W" in body["text"]
+
+
+@pytest.mark.asyncio
+async def test_discord_content_is_truncated():
+    long_title = "X" * 5000
+    w = await store.create_watcher(
+        _defn(name="Long W", publish_target="webhook", webhook_format="discord",
+              webhook_url="https://discord.com/api/webhooks/1/abc")
+    )
+    await store.record_triggers(
+        w["id"],
+        [{"dataset": "normalized", "source_entry_id": 1, "source_name": "feed-a",
+          "event": {"id": 1, "title": long_title}}],
+        max_events=100,
+    )
+    fake = _FakeClient(status_code=204)
+    with _patch_client(fake):
+        await delivery.deliver_pending(await store.get_watcher(w["id"]))
+    assert len(fake.calls[0]["json"]["content"]) <= 2000
+
+
+@pytest.mark.asyncio
+async def test_http_error_records_rich_detail():
+    w = await store.create_watcher(
+        _defn(name="Detail W", publish_target="webhook", webhook_format="discord",
+              webhook_url="https://discord.com/api/webhooks/1/abc")
+    )
+    await _seed(w["id"], n=1)
+    fake = _FakeClient(
+        status_code=400,
+        text='{"message": "Cannot send an empty message", "code": 50006}',
+        headers={"content-type": "application/json"},
+    )
+    with _patch_client(fake):
+        await delivery.deliver_pending(await store.get_watcher(w["id"]))
+    pending = await store.list_pending_deliveries(w["id"])
+    detail = pending[0]["delivery_detail"]
+    assert detail["status"] == 400
+    assert detail["url"] == "https://discord.com/api/webhooks/1/abc"
+    assert "Cannot send an empty message" in detail["body"]
+    assert detail["headers"]["content-type"] == "application/json"
+    # And the watcher summary surfaces the latest error detail.
+    got = await store.get_watcher(w["id"])
+    assert got["last_delivery_detail"]["status"] == 400
+
+
+@pytest.mark.asyncio
+async def test_connection_error_records_detail_without_response():
+    w = await store.create_watcher(
+        _defn(name="ConnD W", publish_target="webhook",
+              webhook_url="https://x.example/in")
+    )
+    await _seed(w["id"], n=1)
+    fake = _FakeClient(raise_exc=httpx.ConnectError("refused"))
+    with _patch_client(fake):
+        await delivery.deliver_pending(await store.get_watcher(w["id"]))
+    pending = await store.list_pending_deliveries(w["id"])
+    detail = pending[0]["delivery_detail"]
+    assert detail["error_type"] == "ConnectError"
+    assert "status" not in detail
+    assert detail["url"] == "https://x.example/in"
+
+
+@pytest.mark.asyncio
+async def test_success_clears_prior_error_detail():
+    w = await store.create_watcher(
+        _defn(name="Clear W", publish_target="webhook",
+              webhook_url="https://x.example/in")
+    )
+    await _seed(w["id"], n=1)
+    with _patch_client(_FakeClient(status_code=500, text="boom")):
+        await delivery.deliver_pending(await store.get_watcher(w["id"]))
+    with _patch_client(_FakeClient(status_code=200)):
+        await delivery.deliver_pending(await store.get_watcher(w["id"]))
+    events = await store.list_events(w["id"])
+    assert events[0]["delivery_status"] == "ok"
+    assert events[0]["delivery_detail"] is None

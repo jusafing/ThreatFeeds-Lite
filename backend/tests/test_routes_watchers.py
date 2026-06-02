@@ -325,6 +325,35 @@ def test_trigger_local_watcher_evaluates_without_delivery(client, monkeypatch):
     assert called["delivered"] is False
 
 
+def test_create_webhook_format_is_persisted_and_returned(client):
+    r = client.post(
+        "/api/watchers",
+        json=_payload(
+            publish_target="webhook",
+            webhook_url="https://discord.com/api/webhooks/1/abc",
+            webhook_format="discord",
+        ),
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["webhook_format"] == "discord"
+    assert body["last_delivery_detail"] is None
+    got = client.get("/api/watchers/critical-cves").json()
+    assert got["webhook_format"] == "discord"
+
+
+def test_create_rejects_invalid_webhook_format(client):
+    r = client.post(
+        "/api/watchers",
+        json=_payload(
+            publish_target="webhook",
+            webhook_url="https://x.example/in",
+            webhook_format="carrier-pigeon",
+        ),
+    )
+    assert r.status_code == 400
+
+
 def test_trigger_remote_watcher_delivers(client, monkeypatch):
     client.post(
         "/api/watchers",

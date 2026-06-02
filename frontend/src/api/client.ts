@@ -1250,11 +1250,22 @@ export type WatcherMode = 'realtime' | 'scheduled'
 export type WatcherFormat = 'json' | 'csv' | 'xml'
 export type WatcherMatchType = 'exact' | 'wildcard' | 'regex' | 'gte' | 'lte'
 export type WatcherPublishTarget = 'local' | 'webhook' | 'http'
+export type WatcherWebhookFormat = 'generic' | 'discord' | 'slack' | 'teams'
 
 export interface WatcherCondition {
   field: string
   value: string
   match_type: WatcherMatchType
+}
+
+export interface DeliveryDetail {
+  url?: string
+  error_type?: string
+  message?: string
+  status?: number | null
+  reason?: string | null
+  headers?: Record<string, string> | null
+  body?: string
 }
 
 export interface WatcherInput {
@@ -1270,6 +1281,7 @@ export interface WatcherInput {
   enabled: boolean
   publish_target: WatcherPublishTarget
   webhook_url: string | null
+  webhook_format: WatcherWebhookFormat
   auth_header: string | null
   auth_value: string | null
 }
@@ -1282,6 +1294,7 @@ export interface Watcher extends WatcherInput {
   last_triggered_at: string | null
   delivery_error_count: number
   last_delivery_error: string | null
+  last_delivery_detail: DeliveryDetail | null
 }
 
 export interface WatcherEvent {
@@ -1294,6 +1307,7 @@ export interface WatcherEvent {
   event: Record<string, unknown>
   delivery_status: 'ok' | 'error' | null
   delivery_error: string | null
+  delivery_detail: DeliveryDetail | null
   delivered_at: string | null
 }
 

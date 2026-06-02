@@ -29,6 +29,7 @@ class WatcherIn(BaseModel):
     enabled: bool = False
     publish_target: str = "local"    # local | webhook | http
     webhook_url: Optional[str] = None
+    webhook_format: str = "generic"  # generic | discord | slack | teams
     auth_header: Optional[str] = None
     auth_value: Optional[str] = None
 
@@ -59,10 +60,12 @@ class WatcherOut(BaseModel):
     last_triggered_at: Optional[str] = None
     publish_target: str = "local"
     webhook_url: Optional[str] = None
+    webhook_format: str = "generic"
     auth_header: Optional[str] = None
     auth_value: Optional[str] = None
     delivery_error_count: int = 0
     last_delivery_error: Optional[str] = None
+    last_delivery_detail: Optional[dict[str, Any]] = None
 
 
 class WatcherEvent(BaseModel):
@@ -76,4 +79,5 @@ class WatcherEvent(BaseModel):
     event: dict[str, Any]
     delivery_status: Optional[str] = None
     delivery_error: Optional[str] = None
+    delivery_detail: Optional[dict[str, Any]] = None
     delivered_at: Optional[str] = None

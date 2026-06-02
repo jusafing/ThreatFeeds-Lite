@@ -11,9 +11,12 @@ import {
   WatcherFormat,
   WatcherMatchType,
   WatcherPublishTarget,
+  WatcherWebhookFormat,
   WatcherEvent,
+  DeliveryDetail,
 } from '../api/client'
 import Toggle from '../components/Toggle'
+import WatcherDeliveryErrorModal from '../components/WatcherDeliveryErrorModal'
 import { getAppBasePrefix } from '../utils/basePrefix'
 import { clsx } from 'clsx'
 import { Plus, Trash2, Pencil, ChevronDown, ChevronUp, Copy, X, RefreshCw, Zap, AlertTriangle } from 'lucide-react'
@@ -30,6 +33,27 @@ const PUBLISH_TARGET_LABELS: Record<WatcherPublishTarget, string> = {
   local: 'Local URL feed',
   webhook: 'Webhook',
   http: 'HTTP Endpoint',
+}
+const WEBHOOK_FORMATS: WatcherWebhookFormat[] = ['generic', 'discord', 'slack', 'teams']
+const WEBHOOK_FORMAT_LABELS: Record<WatcherWebhookFormat, string> = {
+  generic: 'Generic (ThreatFeeds envelope)',
+  discord: 'Discord',
+  slack: 'Slack / Mattermost',
+  teams: 'Microsoft Teams',
+}
+// Best-effort mapping of a webhook URL host to a chat format, mirroring the
+// backend backfill so the form can auto-select a sensible default.
+function detectWebhookFormat(url: string | null | undefined): WatcherWebhookFormat {
+  const host = (url ?? '').toLowerCase()
+  if (host.includes('discord.com') || host.includes('discordapp.com')) return 'discord'
+  if (host.includes('hooks.slack.com') || host.includes('mattermost')) return 'slack'
+  if (
+    host.includes('webhook.office.com') ||
+    host.includes('office.com') ||
+    host.includes('logic.azure.com')
+  )
+    return 'teams'
+  return 'generic'
 }
 const MATCH_TYPE_LABELS: Record<WatcherMatchType, string> = {
   exact: 'exact',
@@ -170,6 +194,9 @@ function SummaryTab() {
   const qc = useQueryClient()
   const { data: watchers, isLoading, isFetching } = useWatchers()
   const [triggerMsg, setTriggerMsg] = useState<string | null>(null)
+  const [detailView, setDetailView] = useState<{ title: string; detail: DeliveryDetail } | null>(
+    null,
+  )
 
   const toggle = useMutation({
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
@@ -225,6 +252,20 @@ function SummaryTab() {
             <p key={w.id} className="text-xs text-amber-200/80">
               <span className="text-amber-200">{w.name}</span>: {w.delivery_error_count} failed
               {w.last_delivery_error ? ` — ${w.last_delivery_error}` : ''}
+              {w.last_delivery_detail && (
+                <button
+                  type="button"
+                  className="ml-2 text-amber-300 underline hover:text-amber-200"
+                  onClick={() =>
+                    setDetailView({
+                      title: `${w.name} — delivery error`,
+                      detail: w.last_delivery_detail as DeliveryDetail,
+                    })
+                  }
+                >
+                  View details
+                </button>
+              )}
             </p>
           ))}
         </div>
@@ -293,6 +334,13 @@ function SummaryTab() {
           </tbody>
         </table>
       </div>
+      {detailView && (
+        <WatcherDeliveryErrorModal
+          title={detailView.title}
+          detail={detailView.detail}
+          onClose={() => setDetailView(null)}
+        />
+      )}
     </div>
   )
 }
@@ -478,6 +526,7 @@ const EMPTY: WatcherInput = {
   enabled: false,
   publish_target: 'local',
   webhook_url: null,
+  webhook_format: 'generic',
   auth_header: null,
   auth_value: null,
 }
@@ -511,6 +560,7 @@ function WatcherForm({
             enabled: editing.enabled,
             publish_target: editing.publish_target,
             webhook_url: editing.webhook_url,
+            webhook_format: editing.webhook_format ?? 'generic',
             auth_header: editing.auth_header,
             auth_value: editing.auth_value,
           }
@@ -763,8 +813,10 @@ function WatcherForm({
                 ...f,
                 publish_target: target,
                 ...(target === 'local'
-                  ? { webhook_url: null, auth_header: null, auth_value: null }
-                  : {}),
+                  ? { webhook_url: null, auth_header: null, auth_value: null, webhook_format: 'generic' as WatcherWebhookFormat }
+                  : target === 'http'
+                    ? { webhook_format: 'generic' as WatcherWebhookFormat }
+                    : { webhook_format: detectWebhookFormat(f.webhook_url) }),
               }))
             }}
           >
@@ -776,7 +828,7 @@ function WatcherForm({
             {form.publish_target === 'local'
               ? 'Events are served from this watcher’s public feed URL only.'
               : form.publish_target === 'webhook'
-                ? 'POST a JSON envelope (watcher metadata + event) to the URL below.'
+                ? 'POST each event to the URL below using the selected webhook format.'
                 : 'POST the bare event JSON to the URL below (listener-compatible shape).'}
           </span>
         </label>
@@ -789,9 +841,44 @@ function WatcherForm({
                 className="input w-full"
                 placeholder="https://example.com/hook"
                 value={form.webhook_url ?? ''}
-                onChange={(e) => set('webhook_url', e.target.value || null)}
+                onChange={(e) => {
+                  const url = e.target.value || null
+                  setForm((f) => ({
+                    ...f,
+                    webhook_url: url,
+                    // Auto-select a chat format from the URL host, but only for
+                    // the webhook target and only while the user hasn't picked a
+                    // non-generic format manually.
+                    ...(f.publish_target === 'webhook' && f.webhook_format === 'generic'
+                      ? { webhook_format: detectWebhookFormat(url) }
+                      : {}),
+                  }))
+                }}
               />
             </label>
+            {form.publish_target === 'webhook' && (
+              <label className="space-y-1 col-span-2">
+                <span className="text-xs text-gray-400">Webhook format</span>
+                <select
+                  className="input w-full"
+                  value={form.webhook_format}
+                  onChange={(e) => set('webhook_format', e.target.value as WatcherWebhookFormat)}
+                >
+                  {WEBHOOK_FORMATS.map((fmt) => (
+                    <option key={fmt} value={fmt}>{WEBHOOK_FORMAT_LABELS[fmt]}</option>
+                  ))}
+                </select>
+                <span className="text-[11px] text-gray-500">
+                  {form.webhook_format === 'generic'
+                    ? 'POST the ThreatFeeds envelope (watcher metadata + event).'
+                    : form.webhook_format === 'discord'
+                      ? 'POST a Discord webhook message ({"content": …}).'
+                      : form.webhook_format === 'slack'
+                        ? 'POST a Slack / Mattermost message ({"text": …}).'
+                        : 'POST a Microsoft Teams MessageCard connector payload.'}
+                </span>
+              </label>
+            )}
             <label className="space-y-1">
               <span className="text-xs text-gray-400">Auth header (optional)</span>
               <input
@@ -962,13 +1049,36 @@ function ActivityTab() {
 }
 
 function DeliveryCell({ ev }: { ev: WatcherEvent }) {
+  const [showDetail, setShowDetail] = useState(false)
   if (ev.delivery_status === 'ok')
     return <span className="text-green-400">delivered</span>
-  if (ev.delivery_status === 'error')
+  if (ev.delivery_status === 'error') {
+    if (ev.delivery_detail) {
+      return (
+        <>
+          <button
+            type="button"
+            className="text-red-400 underline hover:text-red-300"
+            title={ev.delivery_error ?? undefined}
+            onClick={() => setShowDetail(true)}
+          >
+            failed
+          </button>
+          {showDetail && (
+            <WatcherDeliveryErrorModal
+              title={`Event #${ev.id} — delivery error`}
+              detail={ev.delivery_detail}
+              onClose={() => setShowDetail(false)}
+            />
+          )}
+        </>
+      )
+    }
     return (
       <span className="text-red-400" title={ev.delivery_error ?? undefined}>
         failed
       </span>
     )
+  }
   return <span className="text-gray-600">—</span>
 }

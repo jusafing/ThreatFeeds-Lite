@@ -305,15 +305,53 @@ async def test_migration_v2_to_v3_adds_publish_columns(tmp_path, monkeypatch):
     await store.init_watchers_db()
 
     conn = sqlite3.connect(db_path)
-    assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+    assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 4
     wcols = {r[1] for r in conn.execute("PRAGMA table_info(watchers)")}
-    assert {"publish_target", "webhook_url", "auth_header", "auth_value"} <= wcols
+    assert {"publish_target", "webhook_url", "webhook_format", "auth_header", "auth_value"} <= wcols
     ecols = {r[1] for r in conn.execute("PRAGMA table_info(watcher_events)")}
-    assert {"delivery_status", "delivery_error", "delivered_at"} <= ecols
+    assert {"delivery_status", "delivery_error", "delivery_detail", "delivered_at"} <= ecols
     conn.close()
 
     # Idempotent.
     await store.init_watchers_db()
+
+
+@pytest.mark.asyncio
+async def test_migration_v4_backfills_webhook_format_from_host(tmp_path, monkeypatch):
+    """A v3 webhook watcher gains a host-inferred webhook_format on v4 migration."""
+    db_path = tmp_path / "v3.db"
+    monkeypatch.setattr(store, "_WATCHERS_DB_PATH", db_path)
+    conn = sqlite3.connect(db_path)
+    # Minimal v3 watchers table WITHOUT webhook_format.
+    conn.execute(
+        "CREATE TABLE watchers (id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+        "publish_target TEXT NOT NULL DEFAULT 'local', webhook_url TEXT, "
+        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE watcher_events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "watcher_id TEXT NOT NULL, dataset TEXT NOT NULL, source_entry_id INTEGER, "
+        "source_name TEXT, triggered_at TEXT, event_json TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO watchers (id, name, publish_target, webhook_url, created_at, updated_at) "
+        "VALUES ('a', 'Disc', 'webhook', 'https://discord.com/api/webhooks/1/x', 't', 't'), "
+        "('b', 'Plain', 'webhook', 'https://example.com/in', 't', 't'), "
+        "('c', 'Local', 'local', NULL, 't', 't')"
+    )
+    conn.executescript(store.CREATE_SCHEMA_VERSION_TABLE)
+    conn.execute("INSERT INTO schema_version (version) VALUES (3)")
+    conn.commit()
+    conn.close()
+
+    await store.init_watchers_db()
+
+    conn = sqlite3.connect(db_path)
+    fmt = dict(conn.execute("SELECT id, webhook_format FROM watchers").fetchall())
+    conn.close()
+    assert fmt["a"] == "discord"   # host-inferred
+    assert fmt["b"] == "generic"   # unknown host stays generic
+    assert fmt["c"] == "generic"   # local default
 
 
 def test_list_scheduled_watchers_sync_missing_db_is_empty(tmp_path, monkeypatch):
@@ -386,6 +424,50 @@ def test_validate_webhook_accepts_http_and_https():
         assert out["webhook_url"] == url
 
 
+def test_validate_defaults_webhook_format_to_generic():
+    out = store.validate_definition(
+        _defn(publish_target="webhook", webhook_url="https://x.example/h")
+    )
+    assert out["webhook_format"] == "generic"
+
+
+def test_validate_accepts_known_webhook_formats():
+    for fmt in ("generic", "discord", "slack", "teams"):
+        out = store.validate_definition(
+            _defn(publish_target="webhook", webhook_url="https://x.example/h",
+                  webhook_format=fmt)
+        )
+        assert out["webhook_format"] == fmt
+
+
+def test_validate_rejects_unknown_webhook_format():
+    with pytest.raises(ValueError):
+        store.validate_definition(
+            _defn(publish_target="webhook", webhook_url="https://x.example/h",
+                  webhook_format="carrier-pigeon")
+        )
+
+
+def test_validate_forces_generic_format_for_non_webhook_targets():
+    out = store.validate_definition(
+        _defn(publish_target="http", webhook_url="https://x.example/in",
+              webhook_format="discord")
+    )
+    assert out["webhook_format"] == "generic"
+    out = store.validate_definition(
+        _defn(publish_target="local", webhook_format="discord")
+    )
+    assert out["webhook_format"] == "generic"
+
+
+def test_detect_webhook_format_from_host():
+    assert store.detect_webhook_format("https://discord.com/api/webhooks/1/x") == "discord"
+    assert store.detect_webhook_format("https://hooks.slack.com/services/x") == "slack"
+    assert store.detect_webhook_format("https://acme.webhook.office.com/x") == "teams"
+    assert store.detect_webhook_format("https://example.com/in") == "generic"
+    assert store.detect_webhook_format(None) == "generic"
+
+
 @pytest.mark.asyncio
 async def test_create_and_get_round_trips_publish_fields():
     created = await store.create_watcher(
@@ -393,19 +475,23 @@ async def test_create_and_get_round_trips_publish_fields():
             name="Webhook W",
             publish_target="webhook",
             webhook_url="https://hooks.example.com/in",
+            webhook_format="slack",
             auth_header="Authorization",
             auth_value="Bearer secret",
         )
     )
     assert created["publish_target"] == "webhook"
     assert created["webhook_url"] == "https://hooks.example.com/in"
+    assert created["webhook_format"] == "slack"
     assert created["auth_header"] == "Authorization"
     assert created["auth_value"] == "Bearer secret"
     # Fresh read reflects the persisted values + zeroed delivery aggregates.
     got = await store.get_watcher(created["id"])
     assert got["publish_target"] == "webhook"
+    assert got["webhook_format"] == "slack"
     assert got["delivery_error_count"] == 0
     assert got["last_delivery_error"] is None
+    assert got["last_delivery_detail"] is None
 
 
 @pytest.mark.asyncio
@@ -440,23 +526,35 @@ async def test_delivery_status_and_pending_listing():
     assert len(pending) == 2
     ids = sorted(p["id"] for p in pending)
 
-    # Mark one ok, one error.
+    # Mark one ok, one error (with a rich detail blob).
     await store.update_delivery_status(ids[0], "ok", None)
-    await store.update_delivery_status(ids[1], "error", "HTTP 500")
+    await store.update_delivery_status(
+        ids[1], "error", "HTTP 500",
+        {"status": 500, "url": "https://x.example/in", "body": "boom"},
+    )
 
     # Only the errored one remains pending (retried next pass).
     pending2 = await store.list_pending_deliveries(wid)
     assert [p["id"] for p in pending2] == [ids[1]]
 
-    # The watcher aggregate now reports one delivery error.
+    # The watcher aggregate now reports one delivery error + its detail.
     got = await store.get_watcher(wid)
     assert got["delivery_error_count"] == 1
     assert got["last_delivery_error"] == "HTTP 500"
+    assert got["last_delivery_detail"]["status"] == 500
 
-    # list_events exposes per-event delivery columns.
+    # list_events exposes per-event delivery columns incl. parsed detail.
     events = {e["id"]: e for e in await store.list_events(wid)}
     assert events[ids[0]]["delivery_status"] == "ok"
     assert events[ids[0]]["delivery_error"] is None
+    assert events[ids[0]]["delivery_detail"] is None
     assert events[ids[1]]["delivery_status"] == "error"
     assert events[ids[1]]["delivery_error"] == "HTTP 500"
+    assert events[ids[1]]["delivery_detail"]["body"] == "boom"
+
+    # Re-delivering successfully clears the prior error detail.
+    await store.update_delivery_status(ids[1], "ok", None)
+    got2 = await store.get_watcher(wid)
+    assert got2["delivery_error_count"] == 0
+    assert got2["last_delivery_detail"] is None
 
