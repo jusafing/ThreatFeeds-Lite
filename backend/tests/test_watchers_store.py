@@ -265,7 +265,7 @@ async def test_migration_v1_to_v2(tmp_path, monkeypatch):
 
     conn = sqlite3.connect(db_path)
     ver = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert ver == 2
+    assert ver == store._WATCHERS_SCHEMA_VERSION
     # high_water table now exists.
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "watcher_high_water" in tables
@@ -277,6 +277,42 @@ async def test_migration_v1_to_v2(tmp_path, monkeypatch):
     conn.close()
 
     # Idempotent: a second init is a no-op.
+    await store.init_watchers_db()
+
+
+@pytest.mark.asyncio
+async def test_migration_v2_to_v3_adds_publish_columns(tmp_path, monkeypatch):
+    """A v2 DB lacking the publish-target / delivery columns gains them on init
+    (issue_local_007), idempotently."""
+    db_path = tmp_path / "v2.db"
+    monkeypatch.setattr(store, "_WATCHERS_DB_PATH", db_path)
+    conn = sqlite3.connect(db_path)
+    # Minimal v2 tables WITHOUT the v3 columns.
+    conn.execute(
+        "CREATE TABLE watchers (id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE watcher_events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "watcher_id TEXT NOT NULL, dataset TEXT NOT NULL, source_entry_id INTEGER, "
+        "source_name TEXT, triggered_at TEXT, event_json TEXT)"
+    )
+    conn.executescript(store.CREATE_SCHEMA_VERSION_TABLE)
+    conn.execute("INSERT INTO schema_version (version) VALUES (2)")
+    conn.commit()
+    conn.close()
+
+    await store.init_watchers_db()
+
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+    wcols = {r[1] for r in conn.execute("PRAGMA table_info(watchers)")}
+    assert {"publish_target", "webhook_url", "auth_header", "auth_value"} <= wcols
+    ecols = {r[1] for r in conn.execute("PRAGMA table_info(watcher_events)")}
+    assert {"delivery_status", "delivery_error", "delivered_at"} <= ecols
+    conn.close()
+
+    # Idempotent.
     await store.init_watchers_db()
 
 
@@ -293,3 +329,134 @@ async def test_list_scheduled_watchers_sync_returns_scheduled_only():
     rows = store.list_scheduled_watchers_sync()
     ids = {r["id"]: r["interval_sec"] for r in rows}
     assert ids == {"sched-one": 30}
+
+
+# ── Publish target validation (issue_local_007) ─────────────────────────────
+
+
+def test_validate_defaults_publish_target_to_local():
+    out = store.validate_definition(_defn())
+    assert out["publish_target"] == "local"
+    # A local target carries no remote URL/auth even if supplied.
+    assert out["webhook_url"] == ""
+    assert out["auth_header"] == ""
+    assert out["auth_value"] == ""
+
+
+def test_validate_local_clears_supplied_url_and_auth():
+    out = store.validate_definition(
+        _defn(publish_target="local", webhook_url="https://x.example/h", auth_header="X", auth_value="y")
+    )
+    assert out["webhook_url"] == ""
+    assert out["auth_header"] == ""
+    assert out["auth_value"] == ""
+
+
+def test_validate_rejects_unknown_publish_target():
+    with pytest.raises(ValueError):
+        store.validate_definition(_defn(publish_target="carrier-pigeon"))
+
+
+def test_validate_webhook_requires_url():
+    with pytest.raises(ValueError):
+        store.validate_definition(_defn(publish_target="webhook", webhook_url=""))
+
+
+def test_validate_webhook_rejects_non_http_url():
+    with pytest.raises(ValueError):
+        store.validate_definition(
+            _defn(publish_target="webhook", webhook_url="ftp://host/x")
+        )
+
+
+def test_validate_auth_header_value_must_be_paired():
+    with pytest.raises(ValueError):
+        store.validate_definition(
+            _defn(publish_target="http", webhook_url="https://x.example/in", auth_header="Authorization")
+        )
+    with pytest.raises(ValueError):
+        store.validate_definition(
+            _defn(publish_target="http", webhook_url="https://x.example/in", auth_value="Bearer z")
+        )
+
+
+def test_validate_webhook_accepts_http_and_https():
+    for url in ("http://internal.lan/hook", "https://hooks.example.com/in"):
+        out = store.validate_definition(_defn(publish_target="webhook", webhook_url=url))
+        assert out["webhook_url"] == url
+
+
+@pytest.mark.asyncio
+async def test_create_and_get_round_trips_publish_fields():
+    created = await store.create_watcher(
+        _defn(
+            name="Webhook W",
+            publish_target="webhook",
+            webhook_url="https://hooks.example.com/in",
+            auth_header="Authorization",
+            auth_value="Bearer secret",
+        )
+    )
+    assert created["publish_target"] == "webhook"
+    assert created["webhook_url"] == "https://hooks.example.com/in"
+    assert created["auth_header"] == "Authorization"
+    assert created["auth_value"] == "Bearer secret"
+    # Fresh read reflects the persisted values + zeroed delivery aggregates.
+    got = await store.get_watcher(created["id"])
+    assert got["publish_target"] == "webhook"
+    assert got["delivery_error_count"] == 0
+    assert got["last_delivery_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_update_switches_target_and_clears_remote_fields():
+    w = await store.create_watcher(
+        _defn(name="Switchy", publish_target="http", webhook_url="https://a.example/in")
+    )
+    updated = await store.update_watcher(
+        w["id"], _defn(name="Switchy", publish_target="local")
+    )
+    assert updated["publish_target"] == "local"
+    assert updated["webhook_url"] in ("", None)
+
+
+@pytest.mark.asyncio
+async def test_delivery_status_and_pending_listing():
+    w = await store.create_watcher(
+        _defn(name="Deliverable", dataset="normalized", publish_target="webhook",
+              webhook_url="https://x.example/in")
+    )
+    wid = w["id"]
+    triggers = [
+        {"dataset": "normalized", "source_entry_id": 1, "source_name": "feed-a",
+         "event": {"id": 1, "cve_id": "CVE-2024-1"}},
+        {"dataset": "normalized", "source_entry_id": 2, "source_name": "feed-a",
+         "event": {"id": 2, "cve_id": "CVE-2024-2"}},
+    ]
+    await store.record_triggers(wid, triggers, max_events=100)
+
+    # Both events are pending initially.
+    pending = await store.list_pending_deliveries(wid)
+    assert len(pending) == 2
+    ids = sorted(p["id"] for p in pending)
+
+    # Mark one ok, one error.
+    await store.update_delivery_status(ids[0], "ok", None)
+    await store.update_delivery_status(ids[1], "error", "HTTP 500")
+
+    # Only the errored one remains pending (retried next pass).
+    pending2 = await store.list_pending_deliveries(wid)
+    assert [p["id"] for p in pending2] == [ids[1]]
+
+    # The watcher aggregate now reports one delivery error.
+    got = await store.get_watcher(wid)
+    assert got["delivery_error_count"] == 1
+    assert got["last_delivery_error"] == "HTTP 500"
+
+    # list_events exposes per-event delivery columns.
+    events = {e["id"]: e for e in await store.list_events(wid)}
+    assert events[ids[0]]["delivery_status"] == "ok"
+    assert events[ids[0]]["delivery_error"] is None
+    assert events[ids[1]]["delivery_status"] == "error"
+    assert events[ids[1]]["delivery_error"] == "HTTP 500"
+

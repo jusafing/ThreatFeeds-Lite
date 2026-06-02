@@ -23,6 +23,8 @@ from backend.normalizer.db import _allowed_columns, get_normalized_summary
 from backend.normalizer.db import query_normalized
 from backend.config.loader import load_watcher_max_events
 from backend import scheduler as scheduler_mod
+from backend.watchers import engine
+from backend.watchers import delivery
 
 router = APIRouter(prefix="/api/watchers", tags=["watchers"])
 
@@ -172,6 +174,29 @@ async def delete_watcher(watcher_id: str) -> None:
     if not removed:
         raise HTTPException(status_code=404, detail="watcher not found")
     _reschedule()
+
+
+@router.post("/{watcher_id}/trigger")
+async def trigger_watcher(watcher_id: str) -> dict[str, Any]:
+    """Manually evaluate a watcher now (issue_local_007).
+
+    Scans both datasets respecting the per-source high-water marks (so only new
+    matches are recorded), then delivers any pending events to the watcher's
+    remote target. Works on disabled watchers too, so an operator can test a
+    configuration before enabling it.
+    """
+    watcher = await store.get_watcher(watcher_id)
+    if watcher is None:
+        raise HTTPException(status_code=404, detail="watcher not found")
+    triggered = await engine.evaluate_watcher(
+        watcher, {"raw", "normalized"}, ignore_enabled=True
+    )
+    # Deliver synchronously here (outside the realtime fast-path) so the response
+    # reflects the delivery outcome the operator just requested.
+    delivered = {"delivered": 0, "failed": 0}
+    if str(watcher.get("publish_target") or "local") != "local":
+        delivered = await delivery.deliver_pending(watcher)
+    return {"evaluated": 1, "triggered": triggered, "delivery": delivered}
 
 
 @router.get("/{watcher_id}/events")

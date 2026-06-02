@@ -10,19 +10,27 @@ import {
   WatcherMode,
   WatcherFormat,
   WatcherMatchType,
+  WatcherPublishTarget,
+  WatcherEvent,
 } from '../api/client'
 import Toggle from '../components/Toggle'
 import { getAppBasePrefix } from '../utils/basePrefix'
 import { clsx } from 'clsx'
-import { Plus, Trash2, Pencil, ChevronDown, ChevronUp, Copy, X } from 'lucide-react'
+import { Plus, Trash2, Pencil, ChevronDown, ChevronUp, Copy, X, RefreshCw, Zap, AlertTriangle } from 'lucide-react'
 
-type Tab = 'summary' | 'config' | 'details'
+type Tab = 'summary' | 'config' | 'activity'
 
 const SEVERITIES: WatcherSeverity[] = ['low', 'medium', 'high', 'critical']
 const DATASETS: WatcherDataset[] = ['all', 'raw', 'normalized']
 const MODES: WatcherMode[] = ['realtime', 'scheduled']
 const FORMATS: WatcherFormat[] = ['json', 'csv', 'xml']
 const MATCH_TYPES: WatcherMatchType[] = ['exact', 'wildcard', 'regex', 'gte', 'lte']
+const PUBLISH_TARGETS: WatcherPublishTarget[] = ['local', 'webhook', 'http']
+const PUBLISH_TARGET_LABELS: Record<WatcherPublishTarget, string> = {
+  local: 'Local URL feed',
+  webhook: 'Webhook',
+  http: 'HTTP Endpoint',
+}
 const MATCH_TYPE_LABELS: Record<WatcherMatchType, string> = {
   exact: 'exact',
   wildcard: 'wildcard',
@@ -81,7 +89,7 @@ export default function Watchers() {
   const TABS: { id: Tab; label: string }[] = [
     { id: 'summary', label: 'Summary' },
     { id: 'config', label: 'Configuration' },
-    { id: 'details', label: 'Details' },
+    { id: 'activity', label: 'Activity' },
   ]
 
   return (
@@ -113,7 +121,7 @@ export default function Watchers() {
       <div>
         {activeTab === 'summary' && <SummaryTab />}
         {activeTab === 'config' && <ConfigTab />}
-        {activeTab === 'details' && <DetailsTab />}
+        {activeTab === 'activity' && <ActivityTab />}
       </div>
     </div>
   )
@@ -160,7 +168,8 @@ function FeedLink({ id }: { id: string }) {
 
 function SummaryTab() {
   const qc = useQueryClient()
-  const { data: watchers, isLoading } = useWatchers()
+  const { data: watchers, isLoading, isFetching } = useWatchers()
+  const [triggerMsg, setTriggerMsg] = useState<string | null>(null)
 
   const toggle = useMutation({
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
@@ -168,54 +177,122 @@ function SummaryTab() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['watchers'] }),
   })
 
+  const trigger = useMutation({
+    mutationFn: (id: string) => api.watchers.trigger(id),
+    onSuccess: (res, id) => {
+      const w = watchers?.find((x) => x.id === id)
+      const name = w?.name ?? id
+      const deliveryNote =
+        res.delivery.delivered || res.delivery.failed
+          ? ` · delivered ${res.delivery.delivered}, failed ${res.delivery.failed}`
+          : ''
+      setTriggerMsg(
+        `"${name}": evaluated ${res.evaluated}, ${res.triggered} new event(s)${deliveryNote}.`,
+      )
+      qc.invalidateQueries({ queryKey: ['watchers'] })
+      qc.invalidateQueries({ queryKey: ['watcher-events'] })
+    },
+    onError: (err: unknown) =>
+      setTriggerMsg(err instanceof Error ? err.message : String(err)),
+  })
+
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
   if (!watchers || watchers.length === 0)
     return <p className="text-sm text-gray-500">No watchers yet. Create one in the Configuration tab.</p>
 
+  const withErrors = watchers.filter((w) => w.delivery_error_count > 0)
+
   return (
-    <div className="overflow-x-auto">
-      <table className="min-w-full text-sm">
-        <thead>
-          <tr className="text-left text-xs text-gray-500 border-b border-gray-800">
-            <th className="py-2 pr-4">Name</th>
-            <th className="py-2 pr-4">Severity</th>
-            <th className="py-2 pr-4">Dataset</th>
-            <th className="py-2 pr-4">Mode</th>
-            <th className="py-2 pr-4">Format</th>
-            <th className="py-2 pr-4">Triggers</th>
-            <th className="py-2 pr-4">Last Triggered</th>
-            <th className="py-2 pr-4">Enabled</th>
-            <th className="py-2 pr-4">Feed URL</th>
-          </tr>
-        </thead>
-        <tbody>
-          {watchers.map((w) => (
-            <tr key={w.id} className="border-b border-gray-800/60">
-              <td className="py-2 pr-4 text-gray-200">{w.name}</td>
-              <td className="py-2 pr-4 text-gray-400">{w.severity}</td>
-              <td className="py-2 pr-4 text-gray-400">{w.dataset}</td>
-              <td className="py-2 pr-4 text-gray-400">
-                {w.mode === 'scheduled' ? `scheduled (${w.interval_sec}s)` : 'realtime'}
-              </td>
-              <td className="py-2 pr-4 text-gray-400 uppercase">{w.format}</td>
-              <td className="py-2 pr-4 tabular-nums text-gray-300">{w.trigger_count}</td>
-              <td className="py-2 pr-4 whitespace-nowrap text-gray-400">
-                {formatTimestamp(w.last_triggered_at)}
-              </td>
-              <td className="py-2 pr-4">
-                <Toggle
-                  checked={w.enabled}
-                  disabled={toggle.isPending}
-                  onChange={(v) => toggle.mutate({ id: w.id, enabled: v })}
-                />
-              </td>
-              <td className="py-2 pr-4">
-                <FeedLink id={w.id} />
-              </td>
-            </tr>
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <button
+          className="btn-secondary text-xs inline-flex items-center gap-1.5"
+          disabled={isFetching}
+          onClick={() => qc.invalidateQueries({ queryKey: ['watchers'] })}
+        >
+          <RefreshCw className={clsx('w-3.5 h-3.5', isFetching && 'animate-spin')} />
+          Refresh
+        </button>
+        {triggerMsg && <span className="text-xs text-gray-400">{triggerMsg}</span>}
+      </div>
+
+      {withErrors.length > 0 && (
+        <div className="border border-amber-700/50 bg-amber-950/20 rounded-lg px-3 py-2.5 space-y-1">
+          <div className="flex items-center gap-1.5 text-amber-300 text-xs font-medium">
+            <AlertTriangle className="w-3.5 h-3.5" /> Delivery errors
+          </div>
+          {withErrors.map((w) => (
+            <p key={w.id} className="text-xs text-amber-200/80">
+              <span className="text-amber-200">{w.name}</span>: {w.delivery_error_count} failed
+              {w.last_delivery_error ? ` — ${w.last_delivery_error}` : ''}
+            </p>
           ))}
-        </tbody>
-      </table>
+        </div>
+      )}
+
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs text-gray-500 border-b border-gray-800">
+              <th className="py-2 pr-4">Name</th>
+              <th className="py-2 pr-4">Severity</th>
+              <th className="py-2 pr-4">Dataset</th>
+              <th className="py-2 pr-4">Mode</th>
+              <th className="py-2 pr-4">Format</th>
+              <th className="py-2 pr-4">Publish</th>
+              <th className="py-2 pr-4">Triggers</th>
+              <th className="py-2 pr-4">Last Triggered</th>
+              <th className="py-2 pr-4">Enabled</th>
+              <th className="py-2 pr-4">Feed URL</th>
+              <th className="py-2 pr-4"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {watchers.map((w) => (
+              <tr key={w.id} className="border-b border-gray-800/60">
+                <td className="py-2 pr-4 text-gray-200">{w.name}</td>
+                <td className="py-2 pr-4 text-gray-400">{w.severity}</td>
+                <td className="py-2 pr-4 text-gray-400">{w.dataset}</td>
+                <td className="py-2 pr-4 text-gray-400">
+                  {w.mode === 'scheduled' ? `scheduled (${w.interval_sec}s)` : 'realtime'}
+                </td>
+                <td className="py-2 pr-4 text-gray-400 uppercase">{w.format}</td>
+                <td className="py-2 pr-4 text-gray-400">
+                  {PUBLISH_TARGET_LABELS[w.publish_target]}
+                </td>
+                <td className="py-2 pr-4 tabular-nums text-gray-300">{w.trigger_count}</td>
+                <td className="py-2 pr-4 whitespace-nowrap text-gray-400">
+                  {formatTimestamp(w.last_triggered_at)}
+                </td>
+                <td className="py-2 pr-4">
+                  <Toggle
+                    checked={w.enabled}
+                    disabled={toggle.isPending}
+                    onChange={(v) => toggle.mutate({ id: w.id, enabled: v })}
+                  />
+                </td>
+                <td className="py-2 pr-4">
+                  <FeedLink id={w.id} />
+                </td>
+                <td className="py-2 pr-4">
+                  <button
+                    title="Evaluate now over stored events"
+                    className="btn-secondary text-xs inline-flex items-center gap-1"
+                    disabled={trigger.isPending && trigger.variables === w.id}
+                    onClick={() => {
+                      setTriggerMsg(null)
+                      trigger.mutate(w.id)
+                    }}
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    {trigger.isPending && trigger.variables === w.id ? 'Running…' : 'Trigger'}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
@@ -399,6 +476,10 @@ const EMPTY: WatcherInput = {
   format: 'json',
   max_feed_events: 10,
   enabled: false,
+  publish_target: 'local',
+  webhook_url: null,
+  auth_header: null,
+  auth_value: null,
 }
 
 function WatcherForm({
@@ -428,6 +509,10 @@ function WatcherForm({
             format: editing.format,
             max_feed_events: editing.max_feed_events,
             enabled: editing.enabled,
+            publish_target: editing.publish_target,
+            webhook_url: editing.webhook_url,
+            auth_header: editing.auth_header,
+            auth_value: editing.auth_value,
           }
         : { ...EMPTY },
     [editing],
@@ -474,13 +559,21 @@ function WatcherForm({
       (c.match_type !== 'gte' && c.match_type !== 'lte') ||
       (c.value.trim() !== '' && !Number.isNaN(Number(c.value.trim()))),
   )
+  const isRemoteTarget = form.publish_target !== 'local'
+  const validUrl =
+    !isRemoteTarget || /^https?:\/\/.+/i.test((form.webhook_url ?? '').trim())
+  // Auth header name and value must be provided together (or both empty).
+  const authComplete =
+    (!(form.auth_header ?? '').trim()) === (!(form.auth_value ?? '').trim())
   const canSave =
     form.name.trim() !== '' &&
     !nameTaken &&
     validInterval &&
     validMax &&
     hasCondition &&
-    numericConditionsValid
+    numericConditionsValid &&
+    validUrl &&
+    authComplete
 
   const save = useMutation({
     mutationFn: (body: WatcherInput) =>
@@ -657,6 +750,70 @@ function WatcherForm({
         <span className="text-xs text-gray-400">Enabled</span>
       </label>
 
+      {/* Publish target */}
+      <div className="space-y-2 border-t border-gray-800 pt-3">
+        <label className="space-y-1 block max-w-xs">
+          <span className="text-xs text-gray-400">Publish on</span>
+          <select
+            className="input w-full"
+            value={form.publish_target}
+            onChange={(e) => {
+              const target = e.target.value as WatcherPublishTarget
+              setForm((f) => ({
+                ...f,
+                publish_target: target,
+                ...(target === 'local'
+                  ? { webhook_url: null, auth_header: null, auth_value: null }
+                  : {}),
+              }))
+            }}
+          >
+            {PUBLISH_TARGETS.map((t) => (
+              <option key={t} value={t}>{PUBLISH_TARGET_LABELS[t]}</option>
+            ))}
+          </select>
+          <span className="text-[11px] text-gray-500">
+            {form.publish_target === 'local'
+              ? 'Events are served from this watcher’s public feed URL only.'
+              : form.publish_target === 'webhook'
+                ? 'POST a JSON envelope (watcher metadata + event) to the URL below.'
+                : 'POST the bare event JSON to the URL below (listener-compatible shape).'}
+          </span>
+        </label>
+
+        {isRemoteTarget && (
+          <div className="grid grid-cols-2 gap-3 max-w-xl">
+            <label className="space-y-1 col-span-2">
+              <span className="text-xs text-gray-400">Destination URL</span>
+              <input
+                className="input w-full"
+                placeholder="https://example.com/hook"
+                value={form.webhook_url ?? ''}
+                onChange={(e) => set('webhook_url', e.target.value || null)}
+              />
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs text-gray-400">Auth header (optional)</span>
+              <input
+                className="input w-full"
+                placeholder="Authorization"
+                value={form.auth_header ?? ''}
+                onChange={(e) => set('auth_header', e.target.value || null)}
+              />
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs text-gray-400">Auth value (optional)</span>
+              <input
+                className="input w-full"
+                placeholder="Bearer …"
+                value={form.auth_value ?? ''}
+                onChange={(e) => set('auth_value', e.target.value || null)}
+              />
+            </label>
+          </div>
+        )}
+      </div>
+
       {nameTaken && <p className="text-xs text-red-400">A watcher with this name already exists.</p>}
       {!hasCondition && <p className="text-xs text-red-400">At least one condition is required.</p>}
       {!numericConditionsValid && (
@@ -666,6 +823,16 @@ function WatcherForm({
       {!validMax && (
         <p className="text-xs text-red-400">
           Max feed events must be between {MAX_FEED_MIN} and {MAX_FEED_MAX.toLocaleString()}.
+        </p>
+      )}
+      {!validUrl && (
+        <p className="text-xs text-red-400">
+          A valid http(s) destination URL is required for this publish target.
+        </p>
+      )}
+      {!authComplete && (
+        <p className="text-xs text-red-400">
+          Auth header name and value must both be set, or both left empty.
         </p>
       )}
       {error && <p className="text-xs text-red-400">{error}</p>}
@@ -689,11 +856,11 @@ function WatcherForm({
   )
 }
 
-// ── Details tab ──────────────────────────────────────────────────────────────
+// ── Activity tab ─────────────────────────────────────────────────────────────
 
 const PAGE_SIZE = 50
 
-function DetailsTab() {
+function ActivityTab() {
   const { data: watchers } = useWatchers()
   const [selected, setSelected] = useState<string>('')
   const [page, setPage] = useState(0)
@@ -745,6 +912,7 @@ function DetailsTab() {
                   <th className="py-2 pr-4">Triggered</th>
                   <th className="py-2 pr-4">Dataset</th>
                   <th className="py-2 pr-4">Source</th>
+                  <th className="py-2 pr-4">Delivery</th>
                   <th className="py-2 pr-4">Event</th>
                 </tr>
               </thead>
@@ -754,6 +922,9 @@ function DetailsTab() {
                     <td className="py-2 pr-4 whitespace-nowrap text-gray-400">{ev.triggered_at}</td>
                     <td className="py-2 pr-4 text-gray-400">{ev.dataset}</td>
                     <td className="py-2 pr-4 text-gray-400">{ev.source_name ?? '—'}</td>
+                    <td className="py-2 pr-4 whitespace-nowrap">
+                      <DeliveryCell ev={ev} />
+                    </td>
                     <td className="py-2 pr-4">
                       <pre className="font-mono text-[11px] text-gray-300 whitespace-pre-wrap break-all max-w-2xl">
                         {JSON.stringify(ev.event, null, 0)}
@@ -788,4 +959,16 @@ function DetailsTab() {
       )}
     </div>
   )
+}
+
+function DeliveryCell({ ev }: { ev: WatcherEvent }) {
+  if (ev.delivery_status === 'ok')
+    return <span className="text-green-400">delivered</span>
+  if (ev.delivery_status === 'error')
+    return (
+      <span className="text-red-400" title={ev.delivery_error ?? undefined}>
+        failed
+      </span>
+    )
+  return <span className="text-gray-600">—</span>
 }

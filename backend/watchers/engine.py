@@ -31,6 +31,7 @@ from backend.config.loader import load_watcher_max_events
 from backend.db import watchers as store
 from backend.db.manager import query_entries
 from backend.normalizer.db import query_normalized
+from backend.watchers import delivery
 
 logger = logging.getLogger("backend.watchers")
 
@@ -162,7 +163,9 @@ def _new_rows_by_source(
     return fresh, new_marks
 
 
-async def evaluate_watcher(watcher: dict[str, Any], datasets: set[str]) -> int:
+async def evaluate_watcher(
+    watcher: dict[str, Any], datasets: set[str], *, ignore_enabled: bool = False
+) -> int:
     """Evaluate one watcher against the given datasets. Returns new trigger count.
 
     ``datasets`` is the set of dataset namespaces to scan now, e.g. {"raw"},
@@ -173,8 +176,11 @@ async def evaluate_watcher(watcher: dict[str, Any], datasets: set[str]) -> int:
     High-water marks are tracked per (watcher, dataset, source) so a feed whose
     ids sit below another feed's high id is never skipped (issue_local_006
     review_02b).
+
+    ``ignore_enabled`` lets a manual trigger evaluate a disabled watcher (so the
+    operator can test it); the automatic callers leave it False.
     """
-    if not watcher.get("enabled"):
+    if not ignore_enabled and not watcher.get("enabled"):
         return 0
     wid = watcher["id"]
     wanted = {"raw", "normalized"} if watcher.get("dataset") == "all" else {watcher.get("dataset")}
@@ -214,6 +220,11 @@ async def evaluate_watcher(watcher: dict[str, Any], datasets: set[str]) -> int:
             logger.info("watcher %s triggered on %d new event(s)", wid, inserted)
     for ds, new_marks in marks_by_ds.items():
         await store.update_high_water_map(wid, ds, new_marks)
+    # Publish newly-recorded events to a remote target, if configured
+    # (issue_local_007). Best-effort and non-blocking — delivery failures are
+    # recorded per-event and never abort evaluation.
+    if inserted and str(watcher.get("publish_target") or "local") != "local":
+        _schedule_delivery(watcher)
     return inserted
 
 
@@ -260,6 +271,20 @@ async def run_watchers(trigger: str, datasets: set[str] | None = None) -> dict[s
         except Exception as exc:  # pragma: no cover — defensive
             logger.error("watcher %s evaluation failed: %s", watcher.get("id"), exc)
     return {"evaluated": evaluated, "triggered": total}
+
+
+def _schedule_delivery(watcher: dict[str, Any]) -> None:
+    """Run a watcher's remote delivery as a best-effort background task.
+
+    No-op when not inside a running event loop (e.g. synchronous unit tests);
+    callers that need to await delivery should call ``delivery.deliver_pending``
+    directly.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(delivery.deliver_pending(watcher))
 
 
 def schedule_realtime_ingest_eval(inserted: int) -> None:

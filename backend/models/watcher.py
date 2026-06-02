@@ -27,6 +27,10 @@ class WatcherIn(BaseModel):
     format: str = "json"             # json | csv | xml
     max_feed_events: int = 10
     enabled: bool = False
+    publish_target: str = "local"    # local | webhook | http
+    webhook_url: Optional[str] = None
+    auth_header: Optional[str] = None
+    auth_value: Optional[str] = None
 
 
 class WatcherEnabledIn(BaseModel):
@@ -53,6 +57,12 @@ class WatcherOut(BaseModel):
     created_at: str
     updated_at: str
     last_triggered_at: Optional[str] = None
+    publish_target: str = "local"
+    webhook_url: Optional[str] = None
+    auth_header: Optional[str] = None
+    auth_value: Optional[str] = None
+    delivery_error_count: int = 0
+    last_delivery_error: Optional[str] = None
 
 
 class WatcherEvent(BaseModel):
@@ -64,3 +74,6 @@ class WatcherEvent(BaseModel):
     source_name: Optional[str] = None
     triggered_at: str
     event: dict[str, Any]
+    delivery_status: Optional[str] = None
+    delivery_error: Optional[str] = None
+    delivered_at: Optional[str] = None

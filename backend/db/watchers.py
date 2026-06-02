@@ -31,6 +31,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiosqlite
 
@@ -45,7 +46,17 @@ _WATCHERS_DB_PATH = _PROJECT_ROOT / "data" / "watchers.db"
 #        (issue_local_006 review_02b: raw entry ids are per-source sequences, so
 #        a single global high-water mark and a source-less dedup key were both
 #        incorrect across feeds).
-_WATCHERS_SCHEMA_VERSION = 2
+#   v3 — publish targets (issue_local_007): watchers gain publish_target /
+#        webhook_url / auth_header / auth_value; watcher_events gain per-event
+#        delivery_status / delivery_error / delivered_at.
+_WATCHERS_SCHEMA_VERSION = 3
+
+# Allowed publish targets for a watcher (issue_local_007).
+#   local   — publish only to the public /feed/watcher/<id>/ URL (default).
+#   webhook — POST a JSON envelope to a remote webhook URL.
+#   http    — POST the bare event JSON to a remote listener (the same shape the
+#             /api/ingest/listener endpoint accepts).
+VALID_PUBLISH_TARGETS: frozenset[str] = frozenset({"local", "webhook", "http"})
 
 VALID_DATASETS: frozenset[str] = frozenset({"all", "raw", "normalized"})
 VALID_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high", "critical"})
@@ -78,6 +89,10 @@ CREATE TABLE IF NOT EXISTS watchers (
     trigger_count    INTEGER NOT NULL DEFAULT 0,
     last_eval_raw_id  INTEGER NOT NULL DEFAULT 0,
     last_eval_norm_id INTEGER NOT NULL DEFAULT 0,
+    publish_target   TEXT    NOT NULL DEFAULT 'local',
+    webhook_url      TEXT,
+    auth_header      TEXT,
+    auth_value       TEXT,
     created_at       TEXT    NOT NULL,
     updated_at       TEXT    NOT NULL
 );
@@ -91,7 +106,10 @@ CREATE TABLE IF NOT EXISTS watcher_events (
     source_entry_id INTEGER NOT NULL,
     source_name     TEXT,
     triggered_at    TEXT    NOT NULL,
-    event_json      TEXT    NOT NULL DEFAULT '{}'
+    event_json      TEXT    NOT NULL DEFAULT '{}',
+    delivery_status TEXT,
+    delivery_error  TEXT,
+    delivered_at    TEXT
 );
 """
 
@@ -125,6 +143,19 @@ CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
 );
 """
+
+# SQL fragment (issue_local_007) computing per-watcher delivery-error aggregates
+# for the list/get responses: how many recorded events failed delivery, and the
+# most recent error text. Spliced between SELECT expressions, so it ends with a
+# trailing comma.
+_DELIVERY_AGG_SQL = (
+    "(SELECT COUNT(*) FROM watcher_events e "
+    " WHERE e.watcher_id = watchers.id AND e.delivery_status = 'error') "
+    "AS delivery_error_count, "
+    "(SELECT e.delivery_error FROM watcher_events e "
+    " WHERE e.watcher_id = watchers.id AND e.delivery_status = 'error' "
+    " ORDER BY e.id DESC LIMIT 1) AS last_delivery_error "
+)
 
 
 def _now() -> str:
@@ -191,6 +222,44 @@ async def _migrate(db: aiosqlite.Connection, from_version: int) -> None:
         # Drop the legacy source-less dedup index; the caller recreates the
         # 4-column version. No-op if it was never created.
         await db.execute("DROP INDEX IF EXISTS idx_watcher_events_dedup")
+    if from_version < 3:
+        # Publish targets (issue_local_007): add columns to existing tables.
+        # Fresh DBs already have them from the CREATE statements; for upgraded
+        # DBs we add any that are missing (ALTER ADD COLUMN is idempotent-safe
+        # only if guarded, so we check the existing column set first).
+        await _add_columns_if_missing(
+            db, "watchers",
+            {
+                "publish_target": "TEXT NOT NULL DEFAULT 'local'",
+                "webhook_url": "TEXT",
+                "auth_header": "TEXT",
+                "auth_value": "TEXT",
+            },
+        )
+        await _add_columns_if_missing(
+            db, "watcher_events",
+            {
+                "delivery_status": "TEXT",
+                "delivery_error": "TEXT",
+                "delivered_at": "TEXT",
+            },
+        )
+
+
+async def _add_columns_if_missing(
+    db: aiosqlite.Connection, table: str, columns: dict[str, str]
+) -> None:
+    """Add any missing ``columns`` to ``table`` via ALTER TABLE ADD COLUMN.
+
+    SQLite has no ``ADD COLUMN IF NOT EXISTS``, so we read the current schema
+    and only add columns that are absent — keeping the migration idempotent.
+    """
+    cur = await db.execute(f"PRAGMA table_info({table})")
+    existing = {r[1] for r in await cur.fetchall()}
+    await cur.close()
+    for name, decl in columns.items():
+        if name not in existing:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 def _row_to_watcher(row: sqlite3.Row | aiosqlite.Row) -> dict[str, Any]:  # type: ignore[name-defined]
@@ -298,6 +367,33 @@ def validate_definition(data: dict[str, Any]) -> dict[str, Any]:
 
     enabled = bool(data.get("enabled", False))
 
+    publish_target = str(data.get("publish_target", "local") or "local").strip().lower()
+    if publish_target not in VALID_PUBLISH_TARGETS:
+        raise ValueError(f"invalid publish_target: {publish_target!r}")
+
+    webhook_url = str(data.get("webhook_url", "") or "").strip()
+    auth_header = str(data.get("auth_header", "") or "").strip()
+    auth_value = str(data.get("auth_value", "") or "")
+    if publish_target == "local":
+        # A local-feed watcher has no remote target; clear any URL/auth so they
+        # are not silently persisted.
+        webhook_url = ""
+        auth_header = ""
+        auth_value = ""
+    else:
+        if not webhook_url:
+            raise ValueError("webhook_url is required when publish_target is not 'local'")
+        parsed = urlparse(webhook_url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError("webhook_url must be a valid http(s) URL")
+        if len(webhook_url) > 2000:
+            raise ValueError("webhook_url too long (max 2000 chars)")
+        # Auth header name and value are coupled: either both set or both empty.
+        if bool(auth_header) != bool(auth_value):
+            raise ValueError("auth_header and auth_value must be provided together")
+        if len(auth_header) > 200 or len(auth_value) > 2000:
+            raise ValueError("auth header name/value too long")
+
     return {
         "name": name,
         "severity": severity,
@@ -309,6 +405,10 @@ def validate_definition(data: dict[str, Any]) -> dict[str, Any]:
         "format": fmt,
         "max_feed_events": max_feed_events,
         "enabled": enabled,
+        "publish_target": publish_target,
+        "webhook_url": webhook_url,
+        "auth_header": auth_header,
+        "auth_value": auth_value,
     }
 
 
@@ -333,15 +433,19 @@ async def create_watcher(data: dict[str, Any]) -> dict[str, Any]:
                 id, name, severity, dataset, feeds_json, conditions_json,
                 mode, interval_sec, format, max_feed_events, enabled,
                 trigger_count, last_eval_raw_id, last_eval_norm_id,
+                publish_target, webhook_url, auth_header, auth_value,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?)
             """,
             (
                 wid, fields["name"], fields["severity"], fields["dataset"],
                 json.dumps(fields["feeds"], ensure_ascii=False),
                 json.dumps(fields["conditions"], ensure_ascii=False),
                 fields["mode"], fields["interval_sec"], fields["format"],
-                fields["max_feed_events"], int(fields["enabled"]), ts, ts,
+                fields["max_feed_events"], int(fields["enabled"]),
+                fields["publish_target"], fields["webhook_url"] or None,
+                fields["auth_header"] or None, fields["auth_value"] or None,
+                ts, ts,
             ),
         )
         await db.commit()
@@ -360,7 +464,9 @@ async def update_watcher(watcher_id: str, data: dict[str, Any]) -> dict[str, Any
             UPDATE watchers SET
                 name = ?, severity = ?, dataset = ?, feeds_json = ?,
                 conditions_json = ?, mode = ?, interval_sec = ?, format = ?,
-                max_feed_events = ?, enabled = ?, updated_at = ?
+                max_feed_events = ?, enabled = ?,
+                publish_target = ?, webhook_url = ?, auth_header = ?, auth_value = ?,
+                updated_at = ?
             WHERE id = ?
             """,
             (
@@ -368,7 +474,10 @@ async def update_watcher(watcher_id: str, data: dict[str, Any]) -> dict[str, Any
                 json.dumps(fields["feeds"], ensure_ascii=False),
                 json.dumps(fields["conditions"], ensure_ascii=False),
                 fields["mode"], fields["interval_sec"], fields["format"],
-                fields["max_feed_events"], int(fields["enabled"]), ts, watcher_id,
+                fields["max_feed_events"], int(fields["enabled"]),
+                fields["publish_target"], fields["webhook_url"] or None,
+                fields["auth_header"] or None, fields["auth_value"] or None,
+                ts, watcher_id,
             ),
         )
         await db.commit()
@@ -415,7 +524,8 @@ async def get_watcher(watcher_id: str) -> dict[str, Any] | None:
         cur = await db.execute(
             "SELECT *, "
             "(SELECT MAX(triggered_at) FROM watcher_events e WHERE e.watcher_id = watchers.id) "
-            "AS last_triggered_at "
+            "AS last_triggered_at, "
+            + _DELIVERY_AGG_SQL +
             "FROM watchers WHERE id = ?",
             (watcher_id,),
         )
@@ -433,7 +543,8 @@ async def list_watchers() -> list[dict[str, Any]]:
         async for row in await db.execute(
             "SELECT *, "
             "(SELECT MAX(triggered_at) FROM watcher_events e WHERE e.watcher_id = watchers.id) "
-            "AS last_triggered_at "
+            "AS last_triggered_at, "
+            + _DELIVERY_AGG_SQL +
             "FROM watchers ORDER BY created_at DESC"
         ):
             rows.append(_row_to_watcher(row))
@@ -607,6 +718,57 @@ async def count_events(watcher_id: str) -> int:
         row = await cur.fetchone()
         await cur.close()
     return int(row[0]) if row else 0
+
+
+# ── Delivery (issue_local_007) ──────────────────────────────────────────────
+
+
+async def list_pending_deliveries(
+    watcher_id: str, limit: int = 1000
+) -> list[dict[str, Any]]:
+    """Return events for a watcher that have not yet been delivered successfully.
+
+    "Pending" means ``delivery_status`` is NULL (never attempted) or ``'error'``
+    (a prior attempt failed and should be retried). Newest first. The parsed
+    ``event`` dict is included so the caller can build the outbound payload.
+    """
+    await init_watchers_db()
+    if limit < 1:
+        limit = 1
+    async with aiosqlite.connect(_WATCHERS_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        out: list[dict[str, Any]] = []
+        async for row in await db.execute(
+            "SELECT * FROM watcher_events "
+            "WHERE watcher_id = ? AND (delivery_status IS NULL OR delivery_status = 'error') "
+            "ORDER BY id DESC LIMIT ?",
+            (watcher_id, limit),
+        ):
+            d = dict(row)
+            try:
+                d["event"] = json.loads(d.pop("event_json", "{}") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                d["event"] = {}
+            out.append(d)
+    return out
+
+
+async def update_delivery_status(
+    event_id: int, status: str, error: str | None = None
+) -> None:
+    """Record the outcome of a delivery attempt for one event row.
+
+    ``status`` is ``'ok'`` or ``'error'``. ``delivered_at`` is stamped on every
+    attempt; ``delivery_error`` holds the failure text (cleared on success).
+    """
+    await init_watchers_db()
+    async with aiosqlite.connect(_WATCHERS_DB_PATH) as db:
+        await db.execute(
+            "UPDATE watcher_events SET delivery_status = ?, delivery_error = ?, "
+            "delivered_at = ? WHERE id = ?",
+            (status, error if status == "error" else None, _now(), int(event_id)),
+        )
+        await db.commit()
 
 
 def list_scheduled_watchers_sync() -> list[dict[str, Any]]:

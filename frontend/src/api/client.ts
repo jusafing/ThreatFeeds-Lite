@@ -859,6 +859,11 @@ export const api = {
       }),
     remove: (id: string) =>
       request<void>(`/watchers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    trigger: (id: string) =>
+      request<WatcherTriggerResult>(
+        `/watchers/${encodeURIComponent(id)}/trigger`,
+        { method: 'POST' },
+      ),
     events: (id: string, params: { limit?: number; offset?: number } = {}) => {
       const q = new URLSearchParams()
       Object.entries(params).forEach(([k, v]) => {
@@ -1244,6 +1249,7 @@ export type WatcherDataset = 'all' | 'raw' | 'normalized'
 export type WatcherMode = 'realtime' | 'scheduled'
 export type WatcherFormat = 'json' | 'csv' | 'xml'
 export type WatcherMatchType = 'exact' | 'wildcard' | 'regex' | 'gte' | 'lte'
+export type WatcherPublishTarget = 'local' | 'webhook' | 'http'
 
 export interface WatcherCondition {
   field: string
@@ -1262,6 +1268,10 @@ export interface WatcherInput {
   format: WatcherFormat
   max_feed_events: number
   enabled: boolean
+  publish_target: WatcherPublishTarget
+  webhook_url: string | null
+  auth_header: string | null
+  auth_value: string | null
 }
 
 export interface Watcher extends WatcherInput {
@@ -1270,6 +1280,8 @@ export interface Watcher extends WatcherInput {
   created_at: string
   updated_at: string
   last_triggered_at: string | null
+  delivery_error_count: number
+  last_delivery_error: string | null
 }
 
 export interface WatcherEvent {
@@ -1280,9 +1292,18 @@ export interface WatcherEvent {
   source_name: string | null
   triggered_at: string
   event: Record<string, unknown>
+  delivery_status: 'ok' | 'error' | null
+  delivery_error: string | null
+  delivered_at: string | null
 }
 
 export interface WatcherEventsPage {
   events: WatcherEvent[]
   total: number
+}
+
+export interface WatcherTriggerResult {
+  evaluated: number
+  triggered: number
+  delivery: { delivered: number; failed: number }
 }

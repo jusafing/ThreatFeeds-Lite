@@ -249,6 +249,67 @@ async def test_evaluate_raw_watcher_ignores_normalized_scan(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_disabled_watcher_skipped_unless_ignore_enabled(monkeypatch):
+    watcher = await store.create_watcher({
+        "name": "Off", "severity": "high", "dataset": "normalized", "feeds": [],
+        "conditions": [{"field": "severity", "value": "high", "match_type": "exact"}],
+        "mode": "realtime", "enabled": False,
+    })
+    monkeypatch.setattr(
+        engine, "query_normalized",
+        _const([{"id": 1, "severity": "high", "source_name": "a"}]),
+    )
+    monkeypatch.setattr(engine, "query_entries", _const([]))
+    w = await store.get_watcher(watcher["id"])
+    # Normal pass respects the enabled gate.
+    assert await engine.evaluate_watcher(w, {"normalized"}) == 0
+    # Manual trigger bypasses it.
+    assert await engine.evaluate_watcher(w, {"normalized"}, ignore_enabled=True) == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_schedules_delivery_for_remote_target(monkeypatch):
+    watcher = await store.create_watcher({
+        "name": "Remote", "severity": "high", "dataset": "normalized", "feeds": [],
+        "conditions": [{"field": "severity", "value": "high", "match_type": "exact"}],
+        "mode": "realtime", "enabled": True,
+        "publish_target": "webhook", "webhook_url": "https://x.example/in",
+    })
+    monkeypatch.setattr(
+        engine, "query_normalized",
+        _const([{"id": 1, "severity": "high", "source_name": "a"}]),
+    )
+    monkeypatch.setattr(engine, "query_entries", _const([]))
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        engine, "_schedule_delivery", lambda w: scheduled.append(w["id"])
+    )
+    n = await engine.evaluate_watcher(await store.get_watcher(watcher["id"]), {"normalized"})
+    assert n == 1
+    assert scheduled == [watcher["id"]]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_local_target_does_not_schedule_delivery(monkeypatch):
+    watcher = await store.create_watcher({
+        "name": "LocalT", "severity": "high", "dataset": "normalized", "feeds": [],
+        "conditions": [{"field": "severity", "value": "high", "match_type": "exact"}],
+        "mode": "realtime", "enabled": True, "publish_target": "local",
+    })
+    monkeypatch.setattr(
+        engine, "query_normalized",
+        _const([{"id": 1, "severity": "high", "source_name": "a"}]),
+    )
+    monkeypatch.setattr(engine, "query_entries", _const([]))
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        engine, "_schedule_delivery", lambda w: scheduled.append(w["id"])
+    )
+    assert await engine.evaluate_watcher(await store.get_watcher(watcher["id"]), {"normalized"}) == 1
+    assert scheduled == []
+
+
+@pytest.mark.asyncio
 async def test_run_watchers_gates_by_mode(monkeypatch):
     await store.create_watcher({
         "name": "RT", "severity": "high", "dataset": "normalized", "feeds": [],

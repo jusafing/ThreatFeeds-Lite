@@ -291,3 +291,57 @@ def test_feed_is_public_but_admin_routes_gated_when_auth_enabled(client, monkeyp
     # Public feed stays reachable (lives outside /api/).
     _seed_events("json")
     assert client.get("/feed/watcher/critical-cves/").status_code == 200
+
+
+# ── Manual trigger (issue_local_007) ────────────────────────────────────────
+
+
+def test_trigger_missing_watcher_returns_404(client):
+    assert client.post("/api/watchers/nope/trigger").status_code == 404
+
+
+def test_trigger_local_watcher_evaluates_without_delivery(client, monkeypatch):
+    client.post("/api/watchers", json=_payload(publish_target="local"))
+
+    async def fake_eval(watcher, datasets, *, ignore_enabled=False):
+        assert ignore_enabled is True
+        assert datasets == {"raw", "normalized"}
+        return 4
+
+    called = {"delivered": False}
+
+    async def fake_deliver(watcher):  # pragma: no cover - must NOT run for local
+        called["delivered"] = True
+        return {"delivered": 0, "failed": 0}
+
+    monkeypatch.setattr(routes_watchers.engine, "evaluate_watcher", fake_eval)
+    monkeypatch.setattr(routes_watchers.delivery, "deliver_pending", fake_deliver)
+
+    r = client.post("/api/watchers/critical-cves/trigger")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["triggered"] == 4
+    assert body["delivery"] == {"delivered": 0, "failed": 0}
+    assert called["delivered"] is False
+
+
+def test_trigger_remote_watcher_delivers(client, monkeypatch):
+    client.post(
+        "/api/watchers",
+        json=_payload(publish_target="webhook", webhook_url="https://x.example/in"),
+    )
+
+    async def fake_eval(watcher, datasets, *, ignore_enabled=False):
+        return 2
+
+    async def fake_deliver(watcher):
+        return {"delivered": 2, "failed": 0}
+
+    monkeypatch.setattr(routes_watchers.engine, "evaluate_watcher", fake_eval)
+    monkeypatch.setattr(routes_watchers.delivery, "deliver_pending", fake_deliver)
+
+    r = client.post("/api/watchers/critical-cves/trigger")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["triggered"] == 2
+    assert body["delivery"] == {"delivered": 2, "failed": 0}

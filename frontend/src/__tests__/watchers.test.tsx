@@ -21,6 +21,7 @@ vi.mock('../api/client', async () => {
         update: vi.fn(),
         setEnabled: vi.fn(),
         remove: vi.fn(),
+        trigger: vi.fn(),
         events: vi.fn(),
         metaFeeds: vi.fn(),
         metaFields: vi.fn(),
@@ -45,10 +46,16 @@ function watcher(over: Partial<Watcher> = {}): Watcher {
     format: 'json',
     max_feed_events: 10,
     enabled: true,
+    publish_target: 'local',
+    webhook_url: null,
+    auth_header: null,
+    auth_value: null,
     trigger_count: 3,
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-01T00:00:00Z',
     last_triggered_at: null,
+    delivery_error_count: 0,
+    last_delivery_error: null,
     ...over,
   }
 }
@@ -211,5 +218,68 @@ describe('Watchers page (issue_local_006)', () => {
 
     expect(await screen.findByText(/already exists/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Create watcher/i })).toBeDisabled()
+  })
+})
+
+describe('Watchers page (issue_local_007)', () => {
+  it('manually triggers a watcher from the Summary tab', async () => {
+    vi.mocked(api.watchers.list).mockResolvedValue([watcher()])
+    vi.mocked(api.watchers.trigger).mockResolvedValue({
+      evaluated: 12,
+      triggered: 2,
+      delivery: { delivered: 2, failed: 0 },
+    })
+    renderPage()
+
+    await screen.findByText('Critical CVEs')
+    fireEvent.click(screen.getByRole('button', { name: /Trigger/i }))
+    await waitFor(() =>
+      expect(api.watchers.trigger).toHaveBeenCalledWith('critical-cves'),
+    )
+    expect(await screen.findByText(/2 new event\(s\)/i)).toBeInTheDocument()
+  })
+
+  it('surfaces a delivery-error warning card on the Summary tab', async () => {
+    vi.mocked(api.watchers.list).mockResolvedValue([
+      watcher({ delivery_error_count: 3, last_delivery_error: 'HTTP 500' }),
+    ])
+    renderPage()
+
+    expect(await screen.findByText(/Delivery errors/i)).toBeInTheDocument()
+    expect(screen.getByText(/3 failed/i)).toBeInTheDocument()
+    expect(screen.getByText(/HTTP 500/)).toBeInTheDocument()
+  })
+
+  it('reveals the destination URL field when a webhook target is chosen', async () => {
+    vi.mocked(api.watchers.list).mockResolvedValue([])
+    vi.mocked(api.watchers.create).mockResolvedValue(watcher())
+    renderPage()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Configuration' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Add Watcher/i }))
+
+    const nameLabel = await screen.findByText('Name')
+    const input = nameLabel.parentElement!.querySelector('input')!
+    fireEvent.change(input, { target: { value: 'Hooked' } })
+    fireEvent.click(screen.getByRole('button', { name: /Add condition/i }))
+    fireEvent.change(screen.getByPlaceholderText('value'), { target: { value: 'x' } })
+
+    // Choose the Webhook publish target.
+    const publishSelect = screen.getByDisplayValue('Local URL feed')
+    fireEvent.change(publishSelect, { target: { value: 'webhook' } })
+
+    // The URL field appears and save is blocked until a valid http(s) URL is set.
+    const urlInput = await screen.findByPlaceholderText('https://example.com/hook')
+    expect(screen.getByRole('button', { name: /Create watcher/i })).toBeDisabled()
+    expect(
+      screen.getByText(/valid http\(s\) destination URL is required/i),
+    ).toBeInTheDocument()
+
+    fireEvent.change(urlInput, { target: { value: 'https://hook.example/in' } })
+    fireEvent.click(screen.getByRole('button', { name: /Create watcher/i }))
+    await waitFor(() => expect(api.watchers.create).toHaveBeenCalled())
+    const payload = vi.mocked(api.watchers.create).mock.calls[0][0]
+    expect(payload.publish_target).toBe('webhook')
+    expect(payload.webhook_url).toBe('https://hook.example/in')
   })
 })
