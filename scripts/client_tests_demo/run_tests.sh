@@ -93,11 +93,16 @@ while IFS= read -r raw || [ -n "${raw}" ]; do
   # trim surrounding whitespace
   key="$(printf '%s' "${key}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   val="$(printf '%s' "${val}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  # For connection keys ONLY, strip a trailing whitespace-preceded inline
+  # comment (` # ...`) so an example value left with its template comment —
+  # e.g. `url=https://host/alias   # reverse-proxy alias` — yields a clean
+  # value. Credential values are NEVER stripped, so a '#' in a password is safe.
+  cval="$(printf '%s' "${val}" | sed -e 's/[[:space:]]\{1,\}#.*$//' -e 's/[[:space:]]*$//')"
   case "${key}" in
-    host)            HOST="${val}" ;;
-    port)            PORT="${val}" ;;
-    url|base_url)    URL="${val}" ;;
-    skip_tls_verify) SKIP_TLS="${val}" ;;
+    host)            HOST="${cval}" ;;
+    port)            PORT="${cval}" ;;
+    url|base_url)    URL="${cval}" ;;
+    skip_tls_verify) SKIP_TLS="${cval}" ;;
     user_push)       USER_PUSH="${val}" ;;
     pass_push)       PASS_PUSH="${val}" ;;
     user_read)       USER_READ="${val}" ;;

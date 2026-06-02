@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import http.client
 import http.cookiejar
 import json
 import ssl
@@ -92,6 +93,28 @@ def build_opener(insecure: bool = False) -> urllib.request.OpenerDirector:
         ctx.verify_mode = ssl.CERT_NONE
         handlers.append(urllib.request.HTTPSHandler(context=ctx))
     return urllib.request.build_opener(*handlers)
+
+
+def normalize_url(url: str) -> str:
+    """Validate and normalize the base ``--url``.
+
+    Strips surrounding whitespace and rejects values that still contain
+    whitespace or other control characters. This turns a common foot-gun — a
+    stray inline comment left in a ``.env`` (e.g. ``url=https://host/alias  #
+    note``) — into a clear error instead of an obscure ``http.client.InvalidURL``
+    traceback from deep inside urllib.
+    """
+    cleaned = url.strip()
+    if not cleaned:
+        raise ValueError("--url is empty")
+    for ch in cleaned:
+        if ch.isspace() or ord(ch) < 0x20:
+            raise ValueError(
+                f"--url contains whitespace or control characters: {url!r}. "
+                "Check for a stray inline comment in your .env "
+                "(e.g. 'url=https://host/alias  # note')."
+            )
+    return cleaned
 
 
 def build_url(base: str, path: str, params: dict[str, object] | None = None) -> str:
@@ -401,6 +424,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        args.url = normalize_url(args.url)
         return args.func(args)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")
@@ -424,6 +448,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except urllib.error.URLError as exc:
         print(f"Connection error: {exc.reason}", file=sys.stderr)
+        return 1
+    except http.client.HTTPException as exc:
+        print(f"Error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     except (ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

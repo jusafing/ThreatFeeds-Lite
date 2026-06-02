@@ -487,3 +487,39 @@ def test_build_opener_insecure_disables_tls_verification():
     ctx = handler._context
     assert ctx.verify_mode == ssl.CERT_NONE
     assert ctx.check_hostname is False
+
+
+# ── --url normalization / validation (issue_local_005) ───────────────────────
+
+def test_normalize_url_strips_surrounding_whitespace():
+    assert client.normalize_url("  https://h/alias  ") == "https://h/alias"
+
+
+def test_normalize_url_keeps_path_prefix_alias():
+    # A reverse-proxy alias / path prefix must be preserved verbatim.
+    assert client.normalize_url("https://host/pcsi-simple-feed-ingestor") == (
+        "https://host/pcsi-simple-feed-ingestor"
+    )
+
+
+def test_normalize_url_rejects_embedded_whitespace_and_inline_comment():
+    # The reported foot-gun: an inline comment left in the .env value.
+    bad = "https://host/pcsi-simple-feed-ingestor/   # reverse-proxy alias"
+    with pytest.raises(ValueError) as exc:
+        client.normalize_url(bad)
+    assert "inline comment" in str(exc.value)
+
+
+def test_normalize_url_rejects_empty():
+    with pytest.raises(ValueError):
+        client.normalize_url("   ")
+
+
+def test_main_reports_bad_url_cleanly_without_traceback(capsys):
+    """main() must convert a whitespace/comment URL into a clean exit-1 error,
+    not an http.client.InvalidURL traceback."""
+    rc = client.main(["--url", "https://h/a  # note", "get-raw"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Error:" in err
+    assert "inline comment" in err

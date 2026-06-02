@@ -66,6 +66,14 @@ A `url` **must** include `http://` or `https://` (otherwise the runner exits
 with an error); a trailing slash is stripped. If both `url` and `host`/`port`
 are set, **`url` wins** and host/port are ignored (with a warning).
 
+> **Inline comments:** in the comment columns above the `# …` text is only
+> documentation. In your actual `.env`, put one `key=value` per line. For the
+> connection keys (`host`, `port`, `url`, `skip_tls_verify`) a trailing
+> ` # comment` is stripped, so a value left with its template note still works;
+> for credential keys the value is kept verbatim. The `--url` passed to
+> `api_client.py` must contain no whitespace — a stray inline comment in the
+> value is rejected with a clear error rather than a urllib traceback.
+
 ### Self-signed / untrusted TLS
 
 To accept a self-signed or otherwise untrusted certificate, set
