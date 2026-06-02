@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from backend.normalizer.config import (
     VALID_MODES,
@@ -84,19 +84,36 @@ async def get_normalized_entries(
     offset: int = 0,
     search: str | None = None,
     mapping_version_id: int | None = None,
+    field: list[str] | None = Query(
+        None,
+        description=(
+            "Arbitrary column filter as 'name=value' (repeatable). Unknown "
+            "columns are ignored. Validated against the normalized schema."
+        ),
+    ),
 ) -> list[dict[str, Any]]:
     """Query normalized entries.
 
     prompts-021F: ``mapping_version_id`` filters to rows produced under a
     specific mapping_version. Omit to return rows across all versions
     (incl. NULL-version legacy rows).
+
+    issue_local_02: ``field`` carries repeatable 'name=value' column filters,
+    validated against the yaml-derived schema inside query_normalized.
     """
+    filters: dict[str, str] = {}
+    for item in field or []:
+        name, sep, value = item.partition("=")
+        if sep and name:
+            filters[name.strip()] = value
+
     return await query_normalized(
         source_name=source,
         limit=limit,
         offset=offset,
         search=search,
         mapping_version_id=mapping_version_id,
+        filters=filters or None,
     )
 
 

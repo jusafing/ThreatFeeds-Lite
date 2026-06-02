@@ -157,13 +157,13 @@ def test_cmd_get_raw_logs_in_before_fetch(monkeypatch, capsys):
         lambda opener, base, username, password: order.append("login"),
     )
 
-    def fake_fetch(opener, base, path, feeds, max_events):
+    def fake_fetch(opener, base, path, feeds, max_events, fields=None):
         order.append("fetch")
         return [{"id": 1}]
 
     monkeypatch.setattr(client, "fetch_events", fake_fetch)
     ns = type("NS", (), {
-        "url": "http://h:8001", "feeds": [], "max": 10,
+        "url": "http://h:8001", "feeds": [], "max": 10, "field": None,
         "username": "test", "password": "pw",
     })()
     rc = client.cmd_get_raw(ns)
@@ -229,17 +229,80 @@ def test_fetch_events_forwards_search_term_per_feed(monkeypatch):
     assert "source=a" in calls[0] and "source=b" in calls[1]
 
 
+# ── field filters (issue_local_02) ───────────────────────────────────────────
+
+
+def test_build_url_serialises_repeated_field_params():
+    url = client.build_url(
+        "http://h:8000", "/api/viewer/entries",
+        {"field": ["severity=critical", "indicator_type=ipv4"]},
+    )
+    assert "field=severity%3Dcritical" in url
+    assert "field=indicator_type%3Dipv4" in url
+
+
+def test_build_url_drops_empty_field_list():
+    url = client.build_url("http://h:8000", "/api/x", {"limit": 5, "field": []})
+    assert url == "http://h:8000/api/x?limit=5"
+
+
+def test_fetch_events_forwards_field_filters_all_feeds(monkeypatch):
+    calls: list[str] = []
+
+    def fake_get(opener, url):
+        calls.append(url)
+        return [{"id": 1}]
+
+    monkeypatch.setattr(client, "http_get_json", fake_get)
+    client.fetch_events(
+        object(), "http://h:8000", "/api/normalizer/entries", [], 50,
+        fields=["cve_id=CVE-2026-0001"],
+    )
+    assert len(calls) == 1
+    assert "field=cve_id%3DCVE-2026-0001" in calls[0]
+
+
+def test_fetch_events_forwards_field_filters_per_feed(monkeypatch):
+    calls: list[str] = []
+
+    def fake_get(opener, url):
+        calls.append(url)
+        return [{"u": url}]
+
+    monkeypatch.setattr(client, "http_get_json", fake_get)
+    client.fetch_events(
+        object(), "http://h:8000", "/api/viewer/entries", ["a", "b"], 10,
+        fields=["severity=critical"],
+    )
+    assert len(calls) == 2
+    assert all("field=severity%3Dcritical" in url for url in calls)
+
+
+def test_parser_get_raw_accepts_repeated_field():
+    parser = client.build_parser()
+    args = parser.parse_args(
+        ["get-raw", "--field", "severity=critical", "--field", "indicator_type=ipv4"]
+    )
+    assert args.field == ["severity=critical", "indicator_type=ipv4"]
+
+
+def test_parser_get_normalized_field_defaults_none():
+    parser = client.build_parser()
+    args = parser.parse_args(["get-normalized"])
+    assert args.field is None
+
+
 def test_cmd_search_raw_hits_viewer_entries(monkeypatch, capsys):
     captured: dict = {}
 
-    def fake_fetch(opener, base, path, feeds, max_events, search=None):
+    def fake_fetch(opener, base, path, feeds, max_events, search=None, fields=None):
         captured.update(path=path, feeds=feeds, max=max_events, search=search)
         return [{"id": 7}]
 
     monkeypatch.setattr(client, "fetch_events", fake_fetch)
     ns = type("NS", (), {
         "url": "http://h:8000", "feeds": [], "max": 20, "type": "raw",
-        "query": "npm", "username": None, "password": None,
+        "query": "npm", "field": None, "username": None, "password": None,
     })()
     rc = client.cmd_search(ns)
     assert rc == 0
@@ -252,14 +315,14 @@ def test_cmd_search_raw_hits_viewer_entries(monkeypatch, capsys):
 def test_cmd_search_normalized_hits_normalizer_entries(monkeypatch, capsys):
     captured: dict = {}
 
-    def fake_fetch(opener, base, path, feeds, max_events, search=None):
+    def fake_fetch(opener, base, path, feeds, max_events, search=None, fields=None):
         captured["path"] = path
         return []
 
     monkeypatch.setattr(client, "fetch_events", fake_fetch)
     ns = type("NS", (), {
         "url": "http://h:8000", "feeds": [], "max": 1000, "type": "normalized",
-        "query": "npm", "username": None, "password": None,
+        "query": "npm", "field": None, "username": None, "password": None,
     })()
     assert client.cmd_search(ns) == 0
     assert captured["path"] == "/api/normalizer/entries"

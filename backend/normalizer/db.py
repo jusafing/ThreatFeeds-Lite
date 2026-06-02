@@ -247,6 +247,7 @@ async def query_normalized(
     offset: int = 0,
     search: str | None = None,
     mapping_version_id: int | None = None,
+    filters: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     await init_norm_db()
     where_clauses: list[str] = []
@@ -255,6 +256,18 @@ async def query_normalized(
     if source_name:
         where_clauses.append("source_name = ?")
         params.append(source_name)
+    # issue_local_02: arbitrary per-column equality filters. The column name is
+    # interpolated into SQL, so each is validated against the yaml-derived
+    # schema (_allowed_columns); unknown columns — including extra-JSON fields
+    # that don't exist as real columns, or an injection attempt — are silently
+    # dropped rather than executed.
+    if filters:
+        allowed = _allowed_columns()
+        for col, val in filters.items():
+            if col not in allowed:
+                continue
+            where_clauses.append(f"{col} = ?")
+            params.append(val)
     # prompts-021F: viewer dropdown sends mapping_version_id when the
     # operator picks a non-active version; rows produced under that version
     # are returned exclusively. NULL-version rows (pre-021F or sources
