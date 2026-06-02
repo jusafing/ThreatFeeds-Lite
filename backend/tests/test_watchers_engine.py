@@ -103,6 +103,28 @@ def test_missing_field_does_not_match():
     assert engine.row_matches(row, w) is False
 
 
+def test_numeric_gte_match():
+    w = _w(conditions=[{"field": "confidence", "value": "80", "match_type": "gte"}])
+    assert engine.row_matches({"id": 1, "severity": "high", "confidence": "90"}, w) is True
+    assert engine.row_matches({"id": 1, "severity": "high", "confidence": "80"}, w) is True
+    assert engine.row_matches({"id": 1, "severity": "high", "confidence": "79"}, w) is False
+    # Non-numeric target never matches a numeric condition.
+    assert engine.row_matches({"id": 1, "severity": "high", "confidence": "n/a"}, w) is False
+
+
+def test_numeric_lte_match():
+    w = _w(conditions=[{"field": "score", "value": "5", "match_type": "lte"}])
+    assert engine.row_matches({"id": 1, "severity": "high", "score": "3"}, w) is True
+    assert engine.row_matches({"id": 1, "severity": "high", "score": "5"}, w) is True
+    assert engine.row_matches({"id": 1, "severity": "high", "score": "6"}, w) is False
+
+
+def test_numeric_match_handles_floats():
+    w = _w(conditions=[{"field": "score", "value": "2.5", "match_type": "gte"}])
+    assert engine.row_matches({"id": 1, "severity": "high", "score": "2.50"}, w) is True
+    assert engine.row_matches({"id": 1, "severity": "high", "score": "2.4"}, w) is False
+
+
 # ── evaluate_watcher integration (monkeypatched candidate fetch) ─────────────
 
 @pytest.mark.asyncio
@@ -135,7 +157,8 @@ async def test_evaluate_normalized_records_matches(monkeypatch):
 async def test_evaluate_high_water_skips_seen_rows(monkeypatch):
     watcher = await store.create_watcher({
         "name": "All High", "severity": "high", "dataset": "normalized",
-        "feeds": [], "conditions": [], "mode": "realtime", "enabled": True,
+        "feeds": [], "conditions": [{"field": "severity", "value": "high", "match_type": "exact"}],
+        "mode": "realtime", "enabled": True,
     })
     rows = [{"id": 5, "severity": "high", "source_name": "a"}]
     monkeypatch.setattr(engine, "query_normalized", _const(rows))
@@ -149,7 +172,8 @@ async def test_evaluate_high_water_skips_seen_rows(monkeypatch):
 async def test_evaluate_dataset_all_scans_both(monkeypatch):
     watcher = await store.create_watcher({
         "name": "Both", "severity": "high", "dataset": "all",
-        "feeds": [], "conditions": [], "mode": "realtime", "enabled": True,
+        "feeds": [], "conditions": [{"field": "severity", "value": "high", "match_type": "exact"}],
+        "mode": "realtime", "enabled": True,
     })
     monkeypatch.setattr(engine, "query_entries", _const([{"id": 1, "severity": "high", "source": "raw-a"}]))
     monkeypatch.setattr(engine, "query_normalized", _const([{"id": 1, "severity": "high", "source_name": "norm-a"}]))
@@ -163,7 +187,8 @@ async def test_evaluate_dataset_all_scans_both(monkeypatch):
 async def test_evaluate_raw_watcher_ignores_normalized_scan(monkeypatch):
     watcher = await store.create_watcher({
         "name": "Raw Only", "severity": "high", "dataset": "raw",
-        "feeds": [], "conditions": [], "mode": "realtime", "enabled": True,
+        "feeds": [], "conditions": [{"field": "severity", "value": "high", "match_type": "exact"}],
+        "mode": "realtime", "enabled": True,
     })
     monkeypatch.setattr(engine, "query_entries", _const([{"id": 1, "severity": "high", "source": "a"}]))
     monkeypatch.setattr(engine, "query_normalized", _const([{"id": 9, "severity": "high", "source_name": "a"}]))
@@ -175,11 +200,13 @@ async def test_evaluate_raw_watcher_ignores_normalized_scan(monkeypatch):
 async def test_run_watchers_gates_by_mode(monkeypatch):
     await store.create_watcher({
         "name": "RT", "severity": "high", "dataset": "normalized", "feeds": [],
-        "conditions": [], "mode": "realtime", "enabled": True,
+        "conditions": [{"field": "severity", "value": "high", "match_type": "exact"}],
+        "mode": "realtime", "enabled": True,
     })
     await store.create_watcher({
         "name": "Sch", "severity": "high", "dataset": "normalized", "feeds": [],
-        "conditions": [], "mode": "scheduled", "enabled": True,
+        "conditions": [{"field": "severity", "value": "high", "match_type": "exact"}],
+        "mode": "scheduled", "enabled": True,
     })
     monkeypatch.setattr(engine, "query_normalized", _const([{"id": 1, "severity": "high", "source_name": "a"}]))
     monkeypatch.setattr(engine, "query_entries", _const([]))

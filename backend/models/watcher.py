@@ -10,7 +10,7 @@ class WatcherCondition(BaseModel):
     """One field-match condition. ``field`` empty/'*' means match any field."""
     field: str = ""
     value: str
-    match_type: str = "exact"  # exact | wildcard | regex
+    match_type: str = "exact"  # exact | wildcard | regex | gte | lte
 
 
 class WatcherIn(BaseModel):
@@ -52,6 +52,7 @@ class WatcherOut(BaseModel):
     trigger_count: int
     created_at: str
     updated_at: str
+    last_triggered_at: Optional[str] = None
 
 
 class WatcherEvent(BaseModel):

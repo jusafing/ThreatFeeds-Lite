@@ -46,7 +46,10 @@ VALID_DATASETS: frozenset[str] = frozenset({"all", "raw", "normalized"})
 VALID_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high", "critical"})
 VALID_MODES: frozenset[str] = frozenset({"realtime", "scheduled"})
 VALID_FORMATS: frozenset[str] = frozenset({"json", "csv", "xml"})
-VALID_MATCH_TYPES: frozenset[str] = frozenset({"exact", "wildcard", "regex"})
+VALID_MATCH_TYPES: frozenset[str] = frozenset({"exact", "wildcard", "regex", "gte", "lte"})
+
+# Match types that compare numerically and therefore require a numeric value.
+NUMERIC_MATCH_TYPES: frozenset[str] = frozenset({"gte", "lte"})
 
 _MIN_INTERVAL_SEC = 5
 _MAX_FEED_EVENTS_DEFAULT = 10
@@ -182,6 +185,13 @@ def normalize_conditions(conditions: Any) -> list[dict[str, str]]:
                 re.compile(value)
             except re.error as exc:
                 raise ValueError(f"invalid regex: {exc}") from exc
+        if match_type in NUMERIC_MATCH_TYPES:
+            try:
+                float(value)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"condition value for '{match_type}' must be numeric, got {value!r}"
+                ) from None
         out.append({"field": field, "value": value, "match_type": match_type})
     return out
 
@@ -212,6 +222,8 @@ def validate_definition(data: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("feeds must be a list of source names")
 
     conditions = normalize_conditions(data.get("conditions", []) or [])
+    if not conditions:
+        raise ValueError("at least one condition is required")
 
     mode = str(data.get("mode", "realtime") or "realtime").strip().lower()
     if mode not in VALID_MODES:
@@ -350,7 +362,13 @@ async def get_watcher(watcher_id: str) -> dict[str, Any] | None:
     await init_watchers_db()
     async with aiosqlite.connect(_WATCHERS_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT * FROM watchers WHERE id = ?", (watcher_id,))
+        cur = await db.execute(
+            "SELECT *, "
+            "(SELECT MAX(triggered_at) FROM watcher_events e WHERE e.watcher_id = watchers.id) "
+            "AS last_triggered_at "
+            "FROM watchers WHERE id = ?",
+            (watcher_id,),
+        )
         row = await cur.fetchone()
         await cur.close()
     return _row_to_watcher(row) if row is not None else None
@@ -363,7 +381,10 @@ async def list_watchers() -> list[dict[str, Any]]:
         db.row_factory = aiosqlite.Row
         rows: list[dict[str, Any]] = []
         async for row in await db.execute(
-            "SELECT * FROM watchers ORDER BY created_at DESC"
+            "SELECT *, "
+            "(SELECT MAX(triggered_at) FROM watcher_events e WHERE e.watcher_id = watchers.id) "
+            "AS last_triggered_at "
+            "FROM watchers ORDER BY created_at DESC"
         ):
             rows.append(_row_to_watcher(row))
     return rows

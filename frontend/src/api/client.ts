@@ -870,10 +870,14 @@ export const api = {
       )
     },
     metaFeeds: () => request<{ feeds: string[] }>('/watchers/meta/feeds'),
-    metaFields: (dataset: WatcherDataset = 'all') =>
-      request<{ fields: string[] }>(
-        `/watchers/meta/fields?dataset=${encodeURIComponent(dataset)}`,
-      ),
+    metaFields: (dataset: WatcherDataset = 'all', feeds: string[] = []) => {
+      const q = new URLSearchParams()
+      q.set('dataset', dataset)
+      feeds.forEach((f) => {
+        if (f) q.append('feeds', f)
+      })
+      return request<{ fields: string[] }>(`/watchers/meta/fields?${q.toString()}`)
+    },
   },
 }
 
@@ -1239,7 +1243,7 @@ export type WatcherSeverity = 'low' | 'medium' | 'high' | 'critical'
 export type WatcherDataset = 'all' | 'raw' | 'normalized'
 export type WatcherMode = 'realtime' | 'scheduled'
 export type WatcherFormat = 'json' | 'csv' | 'xml'
-export type WatcherMatchType = 'exact' | 'wildcard' | 'regex'
+export type WatcherMatchType = 'exact' | 'wildcard' | 'regex' | 'gte' | 'lte'
 
 export interface WatcherCondition {
   field: string
@@ -1265,6 +1269,7 @@ export interface Watcher extends WatcherInput {
   trigger_count: number
   created_at: string
   updated_at: string
+  last_triggered_at: string | null
 }
 
 export interface WatcherEvent {

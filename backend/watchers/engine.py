@@ -63,6 +63,14 @@ def _condition_value_matches(target: str, value: str, match_type: str) -> bool:
         except re.error as exc:  # pragma: no cover — patterns pre-validated
             logger.warning("invalid regex %r skipped: %s", value, exc)
             return False
+    if match_type in ("gte", "lte"):
+        # Numeric comparison: both sides must parse as numbers, else no match.
+        try:
+            tgt = float(target.strip())
+            ref = float(value.strip())
+        except (TypeError, ValueError):
+            return False
+        return tgt >= ref if match_type == "gte" else tgt <= ref
     return False
 
 

@@ -71,6 +71,47 @@ def test_validate_rejects_empty_condition_value():
         )
 
 
+def test_validate_rejects_zero_conditions():
+    with pytest.raises(ValueError) as exc:
+        store.validate_definition(_defn(conditions=[]))
+    assert "condition" in str(exc.value).lower()
+
+
+def test_validate_accepts_numeric_match_types():
+    out = store.validate_definition(
+        _defn(conditions=[{"field": "confidence", "value": "80", "match_type": "gte"}])
+    )
+    assert out["conditions"][0]["match_type"] == "gte"
+    out2 = store.validate_definition(
+        _defn(conditions=[{"field": "confidence", "value": "20", "match_type": "lte"}])
+    )
+    assert out2["conditions"][0]["match_type"] == "lte"
+
+
+def test_validate_rejects_non_numeric_value_for_numeric_match_type():
+    with pytest.raises(ValueError) as exc:
+        store.validate_definition(
+            _defn(conditions=[{"field": "confidence", "value": "high", "match_type": "gte"}])
+        )
+    assert "numeric" in str(exc.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_last_triggered_at_reflects_latest_event():
+    await store.create_watcher(_defn())
+    got = await store.get_watcher("critical-cves")
+    assert got["last_triggered_at"] is None
+    await store.record_triggers(
+        "critical-cves",
+        [{"dataset": "normalized", "source_entry_id": 1, "source_name": "a", "event": {"id": 1}}],
+        max_events=100,
+    )
+    got = await store.get_watcher("critical-cves")
+    assert got["last_triggered_at"] is not None
+    listed = await store.list_watchers()
+    assert listed[0]["last_triggered_at"] == got["last_triggered_at"]
+
+
 @pytest.mark.asyncio
 async def test_create_and_get_round_trip():
     w = await store.create_watcher(_defn())

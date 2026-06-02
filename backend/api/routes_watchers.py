@@ -17,13 +17,19 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from backend.db import watchers as store
-from backend.db.manager import CORE_COLUMNS, _get_all_sources
+from backend.db.manager import CORE_COLUMNS, _get_all_sources, query_entries
 from backend.models.watcher import WatcherEnabledIn, WatcherIn
 from backend.normalizer.db import _allowed_columns, get_normalized_summary
+from backend.normalizer.db import query_normalized
 from backend.config.loader import load_watcher_max_events
 from backend import scheduler as scheduler_mod
 
 router = APIRouter(prefix="/api/watchers", tags=["watchers"])
+
+# How many recent events to sample per feed when deriving the live field list.
+_FIELD_SAMPLE_PER_FEED = 200
+# System/internal keys never offered as matchable condition fields.
+_FIELD_HIDDEN = {"id", "dedup_key", "normalized", "extra", "extra_norm", "raw"}
 
 
 def _reschedule() -> None:
@@ -65,21 +71,55 @@ async def meta_feeds() -> dict[str, list[str]]:
 
 
 @router.get("/meta/fields")
-async def meta_fields(dataset: str = Query("all")) -> dict[str, list[str]]:
+async def meta_fields(
+    dataset: str = Query("all"),
+    feeds: list[str] = Query(default_factory=list),
+) -> dict[str, list[str]]:
     """Return the matchable field names for a dataset (all|raw|normalized).
 
-    Used to populate the wizard's field dropdown. Matching is applied per field
-    name; the feed multiselect scopes which feeds are searched.
+    Used to populate the wizard's field dropdown. When ``feeds`` are supplied,
+    the field list is derived by sampling recent stored events for exactly those
+    feeds — so custom/extra-JSON fields that only appear in specific sources are
+    offered. With no feeds (or when sampling finds nothing) we fall back to the
+    static schema column lists.
     """
     ds = (dataset or "all").strip().lower()
-    raw_fields = set(CORE_COLUMNS)
-    norm_fields = {c for c in _allowed_columns() if c not in {"extra_norm"}}
+    selected = [f for f in (feeds or []) if f and f.strip()]
+
+    raw_fields_static = set(CORE_COLUMNS)
+    norm_fields_static = {c for c in _allowed_columns() if c not in {"extra_norm"}}
+
+    def _keys_from(rows: list[dict[str, Any]]) -> set[str]:
+        keys: set[str] = set()
+        for row in rows:
+            keys.update(k for k in row.keys() if k not in _FIELD_HIDDEN)
+        return keys
+
+    raw_fields: set[str] = set()
+    norm_fields: set[str] = set()
+
+    if selected:
+        if ds in ("raw", "all"):
+            for feed in selected:
+                rows = await query_entries(
+                    source_name=feed, limit=_FIELD_SAMPLE_PER_FEED
+                )
+                raw_fields |= _keys_from(rows)
+        if ds in ("normalized", "all"):
+            for feed in selected:
+                rows = await query_normalized(
+                    source_name=feed, limit=_FIELD_SAMPLE_PER_FEED
+                )
+                norm_fields |= _keys_from(rows)
+
+    # Fall back to the static schema for any side that produced nothing.
     if ds == "raw":
-        fields = raw_fields
+        fields = raw_fields or raw_fields_static
     elif ds == "normalized":
-        fields = norm_fields
+        fields = norm_fields or norm_fields_static
     else:
-        fields = raw_fields | norm_fields
+        sampled = raw_fields | norm_fields
+        fields = sampled or (raw_fields_static | norm_fields_static)
     return {"fields": sorted(fields)}
 
 

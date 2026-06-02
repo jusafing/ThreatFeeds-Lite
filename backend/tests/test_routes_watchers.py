@@ -85,11 +85,91 @@ def test_create_invalid_regex_returns_400(client):
     assert r.status_code == 400
 
 
+def test_create_without_conditions_returns_400(client):
+    r = client.post("/api/watchers", json=_payload(conditions=[]))
+    assert r.status_code == 400
+    assert "condition" in r.json()["detail"].lower()
+
+
+def test_create_numeric_condition_non_numeric_value_returns_400(client):
+    r = client.post(
+        "/api/watchers",
+        json=_payload(conditions=[{"field": "confidence", "value": "high", "match_type": "gte"}]),
+    )
+    assert r.status_code == 400
+
+
+def test_list_includes_last_triggered_at(client):
+    client.post("/api/watchers", json=_payload())
+    # Before any trigger it is null.
+    body = client.get("/api/watchers").json()
+    assert body[0]["last_triggered_at"] is None
+
+    import anyio
+
+    async def _seed():
+        await store.record_triggers(
+            "critical-cves",
+            [{"dataset": "normalized", "source_entry_id": 1, "source_name": "a", "event": {"id": 1}}],
+            max_events=100,
+        )
+
+    anyio.run(_seed)
+    body = client.get("/api/watchers").json()
+    assert body[0]["last_triggered_at"] is not None
+
+
 def test_meta_fields_endpoint(client):
     r = client.get("/api/watchers/meta/fields", params={"dataset": "raw"})
     assert r.status_code == 200
     fields = r.json()["fields"]
     assert "severity" in fields and "cve_id" in fields
+
+
+def test_meta_fields_feed_aware_samples_custom_fields(client, monkeypatch):
+    # Sampling raw entries for the selected feed surfaces an extra-JSON custom
+    # field that is not part of the static schema.
+    async def _fake_entries(source_name=None, limit=500, **kw):
+        if source_name == "feed-a":
+            return [{"id": 1, "indicator": "1.2.3.4", "custom_threat_score": "9"}]
+        return []
+
+    async def _fake_norm(source_name=None, limit=500, **kw):
+        return []
+
+    monkeypatch.setattr(routes_watchers, "query_entries", _fake_entries)
+    monkeypatch.setattr(routes_watchers, "query_normalized", _fake_norm)
+
+    r = client.get(
+        "/api/watchers/meta/fields", params={"dataset": "raw", "feeds": ["feed-a"]}
+    )
+    assert r.status_code == 200
+    fields = r.json()["fields"]
+    assert "custom_threat_score" in fields
+    assert "indicator" in fields
+    # Internal/system keys are never offered.
+    assert "extra" not in fields and "raw" not in fields
+
+
+def test_meta_fields_feed_aware_unions_multiple_feeds(client, monkeypatch):
+    async def _fake_entries(source_name=None, limit=500, **kw):
+        return {
+            "feed-a": [{"id": 1, "field_a": "x"}],
+            "feed-b": [{"id": 2, "field_b": "y"}],
+        }.get(source_name, [])
+
+    async def _fake_norm(source_name=None, limit=500, **kw):
+        return []
+
+    monkeypatch.setattr(routes_watchers, "query_entries", _fake_entries)
+    monkeypatch.setattr(routes_watchers, "query_normalized", _fake_norm)
+
+    r = client.get(
+        "/api/watchers/meta/fields",
+        params={"dataset": "raw", "feeds": ["feed-a", "feed-b"]},
+    )
+    fields = r.json()["fields"]
+    assert "field_a" in fields and "field_b" in fields
 
 
 def test_events_endpoint_returns_triggers(client):

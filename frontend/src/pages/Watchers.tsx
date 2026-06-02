@@ -22,7 +22,14 @@ const SEVERITIES: WatcherSeverity[] = ['low', 'medium', 'high', 'critical']
 const DATASETS: WatcherDataset[] = ['all', 'raw', 'normalized']
 const MODES: WatcherMode[] = ['realtime', 'scheduled']
 const FORMATS: WatcherFormat[] = ['json', 'csv', 'xml']
-const MATCH_TYPES: WatcherMatchType[] = ['exact', 'wildcard', 'regex']
+const MATCH_TYPES: WatcherMatchType[] = ['exact', 'wildcard', 'regex', 'gte', 'lte']
+const MATCH_TYPE_LABELS: Record<WatcherMatchType, string> = {
+  exact: 'exact',
+  wildcard: 'wildcard',
+  regex: 'regex',
+  gte: '≥ (numeric)',
+  lte: '≤ (numeric)',
+}
 
 const MAX_FEED_MIN = 1
 const MAX_FEED_MAX = 100_000
@@ -32,6 +39,40 @@ function feedUrl(id: string): string {
   const prefix = getAppBasePrefix()
   const path = `${prefix}/feed/watcher/${id}/`
   return `${window.location.origin}${path}`
+}
+
+/** Copy text to clipboard, falling back to a hidden textarea + execCommand when
+ *  the async Clipboard API is unavailable (insecure context / older browsers).
+ *  Returns whether the copy is believed to have succeeded. */
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    /* fall through to legacy path */
+  }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.focus()
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    return ok
+  } catch {
+    return false
+  }
+}
+
+function formatTimestamp(ts: string | null | undefined): string {
+  if (!ts) return 'never'
+  const d = new Date(ts)
+  return Number.isNaN(d.getTime()) ? ts : d.toLocaleString()
 }
 
 export default function Watchers() {
@@ -100,10 +141,12 @@ function FeedLink({ id }: { id: string }) {
       <button
         title="Copy feed URL"
         className="text-gray-500 hover:text-gray-300"
-        onClick={() => {
-          navigator.clipboard?.writeText(url)
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1500)
+        onClick={async () => {
+          const ok = await copyToClipboard(url)
+          if (ok) {
+            setCopied(true)
+            setTimeout(() => setCopied(false), 1500)
+          }
         }}
       >
         <Copy className="w-3.5 h-3.5" />
@@ -140,6 +183,7 @@ function SummaryTab() {
             <th className="py-2 pr-4">Mode</th>
             <th className="py-2 pr-4">Format</th>
             <th className="py-2 pr-4">Triggers</th>
+            <th className="py-2 pr-4">Last Triggered</th>
             <th className="py-2 pr-4">Enabled</th>
             <th className="py-2 pr-4">Feed URL</th>
           </tr>
@@ -155,6 +199,9 @@ function SummaryTab() {
               </td>
               <td className="py-2 pr-4 text-gray-400 uppercase">{w.format}</td>
               <td className="py-2 pr-4 tabular-nums text-gray-300">{w.trigger_count}</td>
+              <td className="py-2 pr-4 whitespace-nowrap text-gray-400">
+                {formatTimestamp(w.last_triggered_at)}
+              </td>
               <td className="py-2 pr-4">
                 <Toggle
                   checked={w.enabled}
@@ -181,6 +228,11 @@ function ConfigTab() {
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState<Watcher | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [dirty, setDirty] = useState(false)
+  const [blockedMsg, setBlockedMsg] = useState<string | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null)
+
+  const formOpen = showForm || editing !== null
 
   const toggle = useMutation({
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
@@ -189,28 +241,61 @@ function ConfigTab() {
   })
   const remove = useMutation({
     mutationFn: (id: string) => api.watchers.remove(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['watchers'] }),
+    onSuccess: () => {
+      setConfirmingDelete(null)
+      qc.invalidateQueries({ queryKey: ['watchers'] })
+    },
   })
+
+  const closeForm = () => {
+    setShowForm(false)
+    setEditing(null)
+    setDirty(false)
+    setBlockedMsg(null)
+  }
+
+  // Guard against silently discarding unsaved edits when the user starts a new
+  // create/edit while a dirty form is open. Allow the switch when the form is
+  // pristine; otherwise surface an inline message and keep the current form.
+  const requestOpenCreate = () => {
+    if (formOpen && dirty) {
+      setBlockedMsg('Finish or discard your current changes before adding another watcher.')
+      return
+    }
+    setBlockedMsg(null)
+    setEditing(null)
+    setShowForm(true)
+  }
+  const requestEdit = (w: Watcher) => {
+    if (editing?.id === w.id) return
+    if (formOpen && dirty) {
+      setBlockedMsg(`Finish or discard your current changes before editing "${w.name}".`)
+      return
+    }
+    setBlockedMsg(null)
+    setShowForm(false)
+    setEditing(w)
+  }
 
   return (
     <div className="space-y-4 max-w-3xl">
-      {!showForm && !editing && (
-        <button className="btn-primary text-xs inline-flex items-center gap-1" onClick={() => setShowForm(true)}>
+      {!formOpen && (
+        <button className="btn-primary text-xs inline-flex items-center gap-1" onClick={requestOpenCreate}>
           <Plus className="w-4 h-4" /> Add Watcher
         </button>
       )}
 
-      {(showForm || editing) && (
+      {blockedMsg && <p className="text-xs text-amber-400">{blockedMsg}</p>}
+
+      {formOpen && (
         <WatcherForm
+          key={editing?.id ?? 'new'}
           existing={watchers ?? []}
           editing={editing}
-          onClose={() => {
-            setShowForm(false)
-            setEditing(null)
-          }}
+          onDirtyChange={setDirty}
+          onClose={closeForm}
           onSaved={() => {
-            setShowForm(false)
-            setEditing(null)
+            closeForm()
             qc.invalidateQueries({ queryKey: ['watchers'] })
           }}
         />
@@ -243,25 +328,42 @@ function ConfigTab() {
                 <button
                   title="Edit"
                   className="text-gray-400 hover:text-gray-200"
-                  onClick={() => {
-                    setEditing(w)
-                    setShowForm(false)
-                  }}
+                  onClick={() => requestEdit(w)}
                 >
                   <Pencil className="w-4 h-4" />
                 </button>
                 <button
                   title="Delete"
                   className="text-gray-400 hover:text-red-400"
-                  onClick={() => {
-                    if (confirm(`Delete watcher "${w.name}"? This removes its triggered events.`))
-                      remove.mutate(w.id)
-                  }}
+                  onClick={() => setConfirmingDelete(w.id)}
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
               </div>
             </div>
+            {confirmingDelete === w.id && (
+              <div className="border-t border-gray-800 px-3 py-2.5 bg-red-950/20 flex items-center justify-between gap-3">
+                <span className="text-xs text-red-300">
+                  Delete watcher "{w.name}"? This permanently removes its triggered events.
+                </span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    className="btn-secondary text-xs"
+                    disabled={remove.isPending}
+                    onClick={() => setConfirmingDelete(null)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="text-xs px-2.5 py-1 rounded bg-red-700 hover:bg-red-600 text-white disabled:opacity-50"
+                    disabled={remove.isPending}
+                    onClick={() => remove.mutate(w.id)}
+                  >
+                    {remove.isPending ? 'Deleting…' : 'Confirm delete'}
+                  </button>
+                </div>
+              </div>
+            )}
             {expanded === w.id && (
               <div className="border-t border-gray-800 px-3 py-2.5 space-y-1 text-xs text-gray-400">
                 <p>Feeds: {w.feeds.length ? w.feeds.join(', ') : 'all'}</p>
@@ -304,37 +406,54 @@ function WatcherForm({
   editing,
   onClose,
   onSaved,
+  onDirtyChange,
 }: {
   existing: Watcher[]
   editing: Watcher | null
   onClose: () => void
   onSaved: () => void
+  onDirtyChange?: (dirty: boolean) => void
 }) {
-  const [form, setForm] = useState<WatcherInput>(() =>
-    editing
-      ? {
-          name: editing.name,
-          severity: editing.severity,
-          dataset: editing.dataset,
-          feeds: [...editing.feeds],
-          conditions: editing.conditions.map((c) => ({ ...c })),
-          mode: editing.mode,
-          interval_sec: editing.interval_sec,
-          format: editing.format,
-          max_feed_events: editing.max_feed_events,
-          enabled: editing.enabled,
-        }
-      : { ...EMPTY },
+  const initial = useMemo<WatcherInput>(
+    () =>
+      editing
+        ? {
+            name: editing.name,
+            severity: editing.severity,
+            dataset: editing.dataset,
+            feeds: [...editing.feeds],
+            conditions: editing.conditions.map((c) => ({ ...c })),
+            mode: editing.mode,
+            interval_sec: editing.interval_sec,
+            format: editing.format,
+            max_feed_events: editing.max_feed_events,
+            enabled: editing.enabled,
+          }
+        : { ...EMPTY },
+    [editing],
   )
+  const [form, setForm] = useState<WatcherInput>(initial)
   const [error, setError] = useState<string | null>(null)
+
+  // Report dirtiness to the parent so it can guard against discarding edits.
+  const dirty = useMemo(
+    () => JSON.stringify(form) !== JSON.stringify(initial),
+    [form, initial],
+  )
+  useEffect(() => {
+    onDirtyChange?.(dirty)
+  }, [dirty, onDirtyChange])
 
   const { data: feedsMeta } = useQuery({
     queryKey: ['watcher-meta-feeds'],
     queryFn: api.watchers.metaFeeds,
   })
+  // Field list is feed-aware: re-derived from sampled stored events whenever the
+  // dataset or the selected feeds change, so per-source custom fields surface.
+  const sortedFeeds = useMemo(() => [...form.feeds].sort(), [form.feeds])
   const { data: fieldsMeta } = useQuery({
-    queryKey: ['watcher-meta-fields', form.dataset],
-    queryFn: () => api.watchers.metaFields(form.dataset),
+    queryKey: ['watcher-meta-fields', form.dataset, sortedFeeds],
+    queryFn: () => api.watchers.metaFields(form.dataset, form.feeds),
   })
 
   const set = <K extends keyof WatcherInput>(k: K, v: WatcherInput[K]) =>
@@ -349,7 +468,19 @@ function WatcherForm({
 
   const validInterval = form.mode !== 'scheduled' || form.interval_sec >= INTERVAL_MIN
   const validMax = form.max_feed_events >= MAX_FEED_MIN && form.max_feed_events <= MAX_FEED_MAX
-  const canSave = form.name.trim() !== '' && !nameTaken && validInterval && validMax
+  const hasCondition = form.conditions.length > 0
+  const numericConditionsValid = form.conditions.every(
+    (c) =>
+      (c.match_type !== 'gte' && c.match_type !== 'lte') ||
+      (c.value.trim() !== '' && !Number.isNaN(Number(c.value.trim()))),
+  )
+  const canSave =
+    form.name.trim() !== '' &&
+    !nameTaken &&
+    validInterval &&
+    validMax &&
+    hasCondition &&
+    numericConditionsValid
 
   const save = useMutation({
     mutationFn: (body: WatcherInput) =>
@@ -475,13 +606,13 @@ function WatcherForm({
       {/* Conditions */}
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <p className="text-xs text-gray-400">Conditions (all must match)</p>
+          <p className="text-xs text-gray-400">Conditions (all must match · at least one required)</p>
           <button className="text-xs text-blue-400 hover:underline inline-flex items-center gap-1" onClick={addCondition}>
             <Plus className="w-3.5 h-3.5" /> Add condition
           </button>
         </div>
         {form.conditions.length === 0 && (
-          <p className="text-xs text-gray-600">No conditions — matches on severity only.</p>
+          <p className="text-xs text-amber-400">Add at least one condition to define what this watcher matches.</p>
         )}
         {form.conditions.map((c, i) => (
           <div key={i} className="flex items-center gap-2">
@@ -496,17 +627,17 @@ function WatcherForm({
               ))}
             </select>
             <select
-              className="input w-28"
+              className="input w-32"
               value={c.match_type}
               onChange={(e) => updateCondition(i, { match_type: e.target.value as WatcherMatchType })}
             >
               {MATCH_TYPES.map((m) => (
-                <option key={m} value={m}>{m}</option>
+                <option key={m} value={m}>{MATCH_TYPE_LABELS[m]}</option>
               ))}
             </select>
             <input
               className="input flex-1"
-              placeholder="value"
+              placeholder={c.match_type === 'gte' || c.match_type === 'lte' ? 'number' : 'value'}
               value={c.value}
               onChange={(e) => updateCondition(i, { value: e.target.value })}
             />
@@ -523,6 +654,10 @@ function WatcherForm({
       </label>
 
       {nameTaken && <p className="text-xs text-red-400">A watcher with this name already exists.</p>}
+      {!hasCondition && <p className="text-xs text-red-400">At least one condition is required.</p>}
+      {!numericConditionsValid && (
+        <p className="text-xs text-red-400">Numeric (≥/≤) conditions require a numeric value.</p>
+      )}
       {!validInterval && <p className="text-xs text-red-400">Interval must be at least {INTERVAL_MIN} seconds.</p>}
       {!validMax && (
         <p className="text-xs text-red-400">
