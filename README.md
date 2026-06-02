@@ -255,9 +255,14 @@ scripts/api_client.py --help          # full syntax for all commands
 
 **Global options**
 
-- `--url` — base API endpoint URL (default `http://127.0.0.1:8000`).
+- `--url` — base API endpoint URL (default `http://127.0.0.1:8000`). Include the
+  scheme; use an `https://…` URL (optionally with a path prefix) to reach a
+  server behind a reverse proxy / alias.
 - `--username` / `-u`, `--password` / `-p` — credentials for an auth-enabled
   server (omit entirely when auth is disabled — see [Authentication](#authentication) below).
+- `--insecure` / `-k` — skip TLS certificate verification (accept self-signed /
+  untrusted certs). **Insecure:** disables MITM protection for the request; only
+  use on a trusted network against a server you can otherwise vouch for.
 
 ### `get-raw` — raw events
 
@@ -296,7 +301,7 @@ scripts/api_client.py get-normalized
 scripts/api_client.py get-normalized feedA --max 20
 
 # Exact-column filter, validated against the normalized schema
-scripts/api_client.py get-normalized --field indicator_type=ipv4
+scripts/api_client.py get-normalized --field indicator_type=ipv4-addr
 ```
 
 > **Raw vs normalized are independent stores.** `get-raw` (and
@@ -388,7 +393,11 @@ in (it is read from `scripts/client_tests_demo/.env.test` by default):
 ```bash
 cp scripts/client_tests_demo/.env.example scripts/client_tests_demo/.env.test
 # then edit .env.test:
-#   host / port            — the server to test
+#   host [+ port]          — target host; port is OPTIONAL (defaults: 80 http / 443 https).
+#                            host may include a scheme (https://host); bare host -> http. OR
+#   url                    — full base URL incl. scheme (reverse-proxy alias / path prefix);
+#                            wins over host/port, must include http:// or https://
+#   skip_tls_verify=true   — accept self-signed/untrusted TLS (insecure; or use -k)
 #   user_push / pass_push  — account used to push events (T1; a sender or admin)
 #   user_read / pass_read  — account used for reads/search/queries (T2–T11; normal or admin)
 ```
@@ -398,6 +407,7 @@ cp scripts/client_tests_demo/.env.example scripts/client_tests_demo/.env.test
 ```bash
 bash scripts/client_tests_demo/run_tests.sh                 # uses .env.test
 bash scripts/client_tests_demo/run_tests.sh --env /path/to/other.env
+bash scripts/client_tests_demo/run_tests.sh -k              # also skip TLS verification
 ```
 
 **3. Read the results.** Each run creates a fresh `test-client-<epoch>/`
@@ -440,6 +450,10 @@ scripts/api_client.py --url http://192.168.0.10:8001 --username analyst get-raw
 # non-interactive (e.g. CI): pass the password explicitly
 scripts/api_client.py --url http://192.168.0.10:8001 -u bot -p "$SFI_PW" \
   send --file events.json
+
+# HTTPS behind a reverse-proxy alias, accepting a self-signed cert (insecure)
+scripts/api_client.py --url https://proxy.example.com/threatfeeds -k \
+  --username analyst get-raw
 ```
 
 A dedicated **sender** account (see [User roles](#user-roles)) is the recommended

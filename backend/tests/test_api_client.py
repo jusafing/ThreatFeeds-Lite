@@ -9,6 +9,8 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import ssl
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -87,7 +89,7 @@ def test_cmd_send_posts_to_listener(monkeypatch, capsys):
     monkeypatch.setattr(client, "http_post_json", fake_post)
     ns = type("NS", (), {
         "url": "http://h:8000", "file": None, "data": '{"indicator": "x"}',
-        "username": None, "password": None,
+        "username": None, "password": None, "insecure": False,
     })()
     rc = client.cmd_send(ns)
     assert rc == 0
@@ -164,7 +166,7 @@ def test_cmd_get_raw_logs_in_before_fetch(monkeypatch, capsys):
     monkeypatch.setattr(client, "fetch_events", fake_fetch)
     ns = type("NS", (), {
         "url": "http://h:8001", "feeds": [], "max": 10, "field": None,
-        "username": "test", "password": "pw",
+        "username": "test", "password": "pw", "insecure": False,
     })()
     rc = client.cmd_get_raw(ns)
     assert rc == 0
@@ -303,6 +305,7 @@ def test_cmd_search_raw_hits_viewer_entries(monkeypatch, capsys):
     ns = type("NS", (), {
         "url": "http://h:8000", "feeds": [], "max": 20, "type": "raw",
         "query": "npm", "field": None, "username": None, "password": None,
+        "insecure": False,
     })()
     rc = client.cmd_search(ns)
     assert rc == 0
@@ -323,6 +326,7 @@ def test_cmd_search_normalized_hits_normalizer_entries(monkeypatch, capsys):
     ns = type("NS", (), {
         "url": "http://h:8000", "feeds": [], "max": 1000, "type": "normalized",
         "query": "npm", "field": None, "username": None, "password": None,
+        "insecure": False,
     })()
     assert client.cmd_search(ns) == 0
     assert captured["path"] == "/api/normalizer/entries"
@@ -338,6 +342,7 @@ def test_cmd_list_feeds_hits_summary(monkeypatch, capsys):
     monkeypatch.setattr(client, "http_get_json", fake_get)
     ns = type("NS", (), {
         "url": "http://h:8000", "type": "raw", "username": None, "password": None,
+        "insecure": False,
     })()
     rc = client.cmd_list_feeds(ns)
     assert rc == 0
@@ -353,6 +358,7 @@ def test_cmd_list_feeds_normalized_summary(monkeypatch, capsys):
     )
     ns = type("NS", (), {
         "url": "http://h:8000", "type": "normalized", "username": None, "password": None,
+        "insecure": False,
     })()
     assert client.cmd_list_feeds(ns) == 0
     assert captured["url"] == "http://h:8000/api/normalizer/summary"
@@ -408,7 +414,7 @@ def test_cmd_query_posts_to_nl_endpoint(monkeypatch, capsys):
     ns = type("NS", (), {
         "url": "http://h:8000", "question": "any log4j?",
         "type": "raw", "source": "feedA", "max": 5,
-        "username": None, "password": None,
+        "username": None, "password": None, "insecure": False,
     })()
     rc = client.cmd_query(ns)
     assert rc == 0
@@ -430,7 +436,54 @@ def test_cmd_query_omits_unset_optionals(monkeypatch):
     ns = type("NS", (), {
         "url": "http://h:8000", "question": "q",
         "type": None, "source": None, "max": None,
-        "username": None, "password": None,
+        "username": None, "password": None, "insecure": False,
     })()
     assert client.cmd_query(ns) == 0
     assert posted["payload"] == {"question": "q"}
+
+
+# ── TLS verification skip (issue_local_003) ──────────────────────────────────
+
+def test_parser_insecure_defaults_false():
+    parser = client.build_parser()
+    args = parser.parse_args(["get-raw"])
+    assert args.insecure is False
+
+
+def test_parser_insecure_long_flag():
+    parser = client.build_parser()
+    args = parser.parse_args(["--insecure", "get-raw"])
+    assert args.insecure is True
+
+
+def test_parser_insecure_short_flag():
+    parser = client.build_parser()
+    args = parser.parse_args(["-k", "get-raw"])
+    assert args.insecure is True
+
+
+def _https_handler(opener):
+    for h in opener.handlers:
+        if isinstance(h, urllib.request.HTTPSHandler):
+            return h
+    return None
+
+
+def test_build_opener_default_verifies_tls():
+    """The default opener installs no custom unverified HTTPS context."""
+    opener = client.build_opener()
+    handler = _https_handler(opener)
+    # Either no explicit HTTPSHandler, or one without a CERT_NONE context.
+    if handler is not None:
+        ctx = getattr(handler, "_context", None)
+        if ctx is not None:
+            assert ctx.verify_mode != ssl.CERT_NONE
+
+
+def test_build_opener_insecure_disables_tls_verification():
+    opener = client.build_opener(insecure=True)
+    handler = _https_handler(opener)
+    assert handler is not None, "insecure opener must install an HTTPSHandler"
+    ctx = handler._context
+    assert ctx.verify_mode == ssl.CERT_NONE
+    assert ctx.check_hostname is False

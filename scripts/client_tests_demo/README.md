@@ -39,11 +39,53 @@ pass_read=...
 
 Real `.env*` files are **gitignored** — only `.env.example` is committed.
 
+### Targeting the server
+
+You can point the runner at the server in one of two ways:
+
+- **`host`** (with an optional **`port`**) — `port` is optional: when omitted the
+  scheme's default port applies (`80` for http, `443` for https). `host` may also
+  carry a scheme; without one it defaults to `http://`. Examples:
+
+  ```
+  host=192.0.2.10                          # + port=8001 -> http://192.0.2.10:8001
+  host=threats.example.com                 # no port     -> http://threats.example.com (80)
+  host=https://threats.example.com         # no port     -> https://threats.example.com (443)
+  host=https://threats.example.com         # + port=8443 -> https://threats.example.com:8443
+  ```
+
+  (If `host` already embeds a port, a separate `port=` is ignored with a warning.)
+- **`url`** — a full base URL **including the scheme**. Use this when the server
+  is behind a reverse proxy / path prefix (an alias), e.g.:
+
+  ```
+  url=https://proxy.example.com/threatfeeds   # reverse-proxy alias
+  ```
+
+A `url` **must** include `http://` or `https://` (otherwise the runner exits
+with an error); a trailing slash is stripped. If both `url` and `host`/`port`
+are set, **`url` wins** and host/port are ignored (with a warning).
+
+### Self-signed / untrusted TLS
+
+To accept a self-signed or otherwise untrusted certificate, set
+`skip_tls_verify=true` in the env file (truthy: `1`, `true`, `yes`, `on`) or
+pass `-k` / `--insecure` on the command line:
+
+```bash
+./run_tests.sh -k                       # or --insecure
+```
+
+> **Security:** this disables certificate verification for the entire run and
+> exposes the session to man-in-the-middle attacks. Only use it on trusted
+> networks against a server whose identity you can otherwise vouch for.
+
 **2. Run the plan.**
 
 ```bash
 ./run_tests.sh                      # uses ./.env.test
 ./run_tests.sh --env /path/to.env   # or point at another env file
+./run_tests.sh -k                   # also skip TLS cert verification (insecure)
 ```
 
 **3. Inspect the results.** Each run creates a fresh `test-client-<epoch>/`
@@ -72,7 +114,7 @@ verification only and are never committed.
 | `T8-query-critical-cves` | read | NL query: critical 2026 CVEs by vendor (LLM) |
 | `T9-query-actor-indicators` | read | NL query: high-severity indicators by actor (LLM) |
 | `T10-field-raw-severity` | read | Field search from raw: exact `severity=critical` via `--field` (no LLM) |
-| `T11-field-normalized-indicator-type` | read | Field search from normalized: exact `indicator_type=ipv4` via `--field` (no LLM) |
+| `T11-field-normalized-indicator-type` | read | Field search from normalized: exact `indicator_type=ipv4-addr` via `--field` (no LLM) |
 
 The natural-language tests (T7–T9) require an LLM provider configured on the
 server; without one they record an HTTP `503`. See the **API Client Script →

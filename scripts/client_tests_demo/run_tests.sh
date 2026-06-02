@@ -10,12 +10,15 @@
 #   - execution.log    timestamps, per-test status/exit code, and any errors
 #
 # Connection and credentials are read from a .env file (default: ./.env.test,
-# resolved next to this script). Push tests use the push account; read/query
-# tests use the read account.
+# resolved next to this script). The target is given EITHER as a host (with an
+# optional port, and an optional http://|https:// scheme) OR as a full base URL
+# (url=...), the latter for a domain / reverse proxy / alias path.
+# Push tests use the push account; read/query tests use the read account.
 #
 # Usage:
 #   ./run_tests.sh [ENV_FILE]
 #   ./run_tests.sh --env /path/to/.env.test
+#   ./run_tests.sh -k | --insecure        # skip TLS verification (self-signed)
 #
 # The results directory is NOT committed (see .gitignore in this folder); it is
 # for local verification only.
@@ -37,18 +40,24 @@ fi
 
 # ── parse args ───────────────────────────────────────────────────────────────
 ENV_FILE="${SCRIPT_DIR}/.env.test"
-case "${1:-}" in
-  --env)
-    ENV_FILE="${2:?--env requires a path}" ;;
-  "" )
-    ;;
-  -* )
-    echo "Unknown option: $1" >&2
-    echo "Usage: $0 [ENV_FILE] | $0 --env <path>" >&2
-    exit 2 ;;
-  * )
-    ENV_FILE="$1" ;;
-esac
+CLI_INSECURE=0    # -k/--insecure on the command line overrides the env-file value
+USAGE="Usage: $0 [ENV_FILE] [--env <path>] [-k|--insecure]"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --env)
+      ENV_FILE="${2:?--env requires a path}"; shift 2 ;;
+    -k|--insecure)
+      CLI_INSECURE=1; shift ;;
+    -h|--help)
+      echo "${USAGE}"; exit 0 ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      echo "${USAGE}" >&2
+      exit 2 ;;
+    *)
+      ENV_FILE="$1"; shift ;;
+  esac
+done
 
 # Resolve a relative ENV_FILE against the script dir for convenience.
 if [ ! -e "${ENV_FILE}" ] && [ -e "${SCRIPT_DIR}/${ENV_FILE}" ]; then
@@ -67,7 +76,8 @@ fi
 # ── tolerant .env parser ─────────────────────────────────────────────────────
 # Accepts `key=value` and `key:value`. Ignores blank lines and `#` comments.
 # Splits on the FIRST delimiter only, so values may contain '=' or ':'.
-HOST=""; PORT=""; USER_PUSH=""; PASS_PUSH=""; USER_READ=""; PASS_READ=""
+HOST=""; PORT=""; URL=""; SKIP_TLS=""
+USER_PUSH=""; PASS_PUSH=""; USER_READ=""; PASS_READ=""
 while IFS= read -r raw || [ -n "${raw}" ]; do
   line="${raw%$'\r'}"                      # strip trailing CR
   case "${line}" in
@@ -84,30 +94,83 @@ while IFS= read -r raw || [ -n "${raw}" ]; do
   key="$(printf '%s' "${key}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   val="$(printf '%s' "${val}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   case "${key}" in
-    host)      HOST="${val}" ;;
-    port)      PORT="${val}" ;;
-    user_push) USER_PUSH="${val}" ;;
-    pass_push) PASS_PUSH="${val}" ;;
-    user_read) USER_READ="${val}" ;;
-    pass_read) PASS_READ="${val}" ;;
+    host)            HOST="${val}" ;;
+    port)            PORT="${val}" ;;
+    url|base_url)    URL="${val}" ;;
+    skip_tls_verify) SKIP_TLS="${val}" ;;
+    user_push)       USER_PUSH="${val}" ;;
+    pass_push)       PASS_PUSH="${val}" ;;
+    user_read)       USER_READ="${val}" ;;
+    pass_read)       PASS_READ="${val}" ;;
   esac
 done < "${ENV_FILE}"
 
+# Credentials are always required.
 missing=""
-[ -n "${HOST}" ]      || missing="${missing} host"
-[ -n "${PORT}" ]      || missing="${missing} port"
 [ -n "${USER_PUSH}" ] || missing="${missing} user_push"
 [ -n "${PASS_PUSH}" ] || missing="${missing} pass_push"
 [ -n "${USER_READ}" ] || missing="${missing} user_read"
 [ -n "${PASS_READ}" ] || missing="${missing} pass_read"
 if [ -n "${missing}" ]; then
   echo "Error: ${ENV_FILE} is missing required key(s):${missing}" >&2
-  echo "Expected keys: host, port, user_push, pass_push, user_read, pass_read" >&2
+  echo "Expected: a target (url, OR host with optional port) plus user_push, pass_push, user_read, pass_read" >&2
   echo "See .env.example for the canonical format." >&2
   exit 1
 fi
 
-BASE_URL="http://${HOST}:${PORT}"
+# Target: either a full base URL, or host (+ optional port).
+if [ -n "${URL}" ]; then
+  case "${URL}" in
+    http://*|https://*) ;;
+    *)
+      echo "Error: 'url' must include a scheme, e.g. https://host or https://host/alias" >&2
+      echo "       (got: ${URL})" >&2
+      exit 1 ;;
+  esac
+  if [ -n "${HOST}" ] || [ -n "${PORT}" ]; then
+    echo "Warning: both 'url' and host/port set in ${ENV_FILE}; using url and ignoring host/port." >&2
+  fi
+  BASE_URL="${URL%/}"     # strip a trailing slash for clean joins/logs
+else
+  # host is required; port is OPTIONAL. host may carry its own scheme
+  # (http:// or https://); without one we default to http for backward
+  # compatibility. When no port is given the scheme's default applies
+  # (80 for http, 443 for https) — e.g. host=https://example.com → port 443.
+  if [ -z "${HOST}" ]; then
+    echo "Error: no target in ${ENV_FILE}: set 'url', or 'host' (port optional)" >&2
+    echo "See .env.example for the canonical format." >&2
+    exit 1
+  fi
+  scheme="http://"
+  authority="${HOST}"
+  case "${HOST}" in
+    http://*)  scheme="http://";  authority="${HOST#http://}" ;;
+    https://*) scheme="https://"; authority="${HOST#https://}" ;;
+  esac
+  authority="${authority%/}"          # drop any trailing slash
+  if [ -n "${PORT}" ]; then
+    case "${authority}" in
+      *:[0-9]*)
+        echo "Warning: 'host' already includes a port; ignoring the separate 'port=${PORT}'." >&2 ;;
+      *)
+        authority="${authority}:${PORT}" ;;
+    esac
+  fi
+  BASE_URL="${scheme}${authority}"
+fi
+
+# TLS verification: enabled by default. A truthy skip_tls_verify in the env file
+# or the -k/--insecure command-line flag disables it (self-signed / dev certs).
+INSECURE=0
+case "$(printf '%s' "${SKIP_TLS}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on) INSECURE=1 ;;
+esac
+[ "${CLI_INSECURE}" -eq 1 ] && INSECURE=1
+
+INSECURE_ARGS=()
+if [ "${INSECURE}" -eq 1 ]; then
+  INSECURE_ARGS=( --insecure )
+fi
 
 # ── results directory ────────────────────────────────────────────────────────
 EPOCH="$(date +%s)"
@@ -124,6 +187,9 @@ exec_log() { printf '%s %s\n' "$(ts)" "$*" >> "${EXEC_LOG}"; }
 
 exec_log "run started: env=${ENV_FILE} base_url=${BASE_URL} out_dir=${OUT_DIR}"
 exec_log "python=${PYTHON}"
+if [ "${INSECURE}" -eq 1 ]; then
+  exec_log "TLS certificate verification DISABLED (--insecure): accepting self-signed / untrusted certs"
+fi
 
 # ── per-test driver ──────────────────────────────────────────────────────────
 # run_test <num> <slug> <title> <role> <description> -- <api_client args...>
@@ -137,9 +203,9 @@ run_test() {
   else user="${USER_READ}"; pass="${PASS_READ}"; fi
 
   local md="${OUT_DIR}/T${num}-${slug}.md"
-  local args=( --url "${BASE_URL}" --username "${user}" --password "${pass}" "$@" )
+  local args=( --url "${BASE_URL}" "${INSECURE_ARGS[@]}" --username "${user}" --password "${pass}" "$@" )
   # Display version with the password masked for the run log + markdown.
-  local disp=( api_client.py --url "${BASE_URL}" --username "${user}" --password '***' "$@" )
+  local disp=( api_client.py --url "${BASE_URL}" "${INSECURE_ARGS[@]}" --username "${user}" --password '***' "$@" )
 
   printf 'T%s [%s] %s\n' "${num}" "${role}" "${disp[*]}" >> "${RUN_LOG}"
   exec_log "T${num} ${slug} start (role=${role}, user=${user})"
@@ -240,9 +306,9 @@ run_test 10 field-raw-severity "Field search from raw: severity=critical" read \
   "Fetch raw rows filtered by an exact column value (severity=critical) using the repeatable --field flag. Unknown columns are ignored server-side." \
   -- get-raw --field severity=critical --max 25
 
-run_test 11 field-normalized-indicator-type "Field search from normalized: indicator_type=ipv4" read \
-  "Fetch normalized rows filtered by an exact column value (indicator_type=ipv4) from the normalized store. Validated against the normalized schema." \
-  -- get-normalized --field indicator_type=ipv4 --max 25
+run_test 11 field-normalized-indicator-type "Field search from normalized: indicator_type=ipv4-addr" read \
+  "Fetch normalized rows filtered by an exact column value (indicator_type=ipv4-addr) from the normalized store. Validated against the normalized schema." \
+  -- get-normalized --field indicator_type=ipv4-addr --max 25
 
 exec_log "run finished: results in ${OUT_DIR}"
 echo "Done. Results: ${OUT_DIR}"
