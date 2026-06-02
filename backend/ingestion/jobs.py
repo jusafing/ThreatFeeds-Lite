@@ -138,6 +138,7 @@ class JobStore:
         logger.debug("job_done id=%s counters=%s", job_id, counters)
         self._persist_meta(job)
         self._maybe_trigger_smart_mode(job)
+        self._maybe_trigger_watchers(job)
 
     def fail(self, job_id: str, error_msg: str) -> None:
         job = self._jobs.get(job_id)
@@ -204,6 +205,29 @@ class JobStore:
         loop.create_task(
             scheduler_mod.submit_smart_job(job.source, reason="on_new_feed")
         )
+
+    # ── Watcher trigger (issue_local_006) ────────────────────────────────────
+
+    def _maybe_trigger_watchers(self, job: Job) -> None:
+        """Evaluate realtime watchers against the raw dataset when this job
+        actually indexed new events.
+
+        Lazy-imports the watcher engine to avoid an import cycle, and runs the
+        evaluation as a background task so the synchronous completion path is
+        not blocked. No-op when nothing was inserted or when not inside an event
+        loop (e.g. sync unit tests).
+        """
+        if int(job.counters.get("inserted", 0) or 0) <= 0:
+            return
+        try:
+            from backend.watchers.engine import run_watchers  # noqa: WPS433
+        except Exception:  # pragma: no cover — defensive
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(run_watchers("ingest", {"raw"}))
 
     # ── Maintenance ──────────────────────────────────────────────────────────
 

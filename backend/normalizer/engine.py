@@ -502,6 +502,14 @@ async def run_normalizer(trigger: str = "manual") -> dict[str, Any]:
         )
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("run-history record failed: %s", exc)
+    # issue_local_006: evaluate realtime watchers against the normalized dataset
+    # now that new rows have been indexed. Best-effort; never break a run.
+    if inserted:
+        try:
+            from backend.watchers.engine import run_watchers
+            await run_watchers("normalize", {"normalized"})
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("watcher evaluation after normalize failed: %s", exc)
     return {
         "status": "ok",
         "mode": mode,

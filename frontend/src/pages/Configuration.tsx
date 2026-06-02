@@ -246,6 +246,7 @@ function ApplicationTab() {
       </div>
 
       <PaginationMaxSetting />
+      <WatcherMaxEventsSetting />
       <LogoSetting />
     </div>
   )
@@ -332,8 +333,88 @@ function PaginationMaxSetting() {
   )
 }
 
-// ── Branding logo (prompts-045) ──────────────────────────────────────────────
+// ── Per-watcher stored/feed event cap (issue_local_006) ──────────────────────
 
+const WATCHER_MAX_EVENTS_MIN = 10
+const WATCHER_MAX_EVENTS_MAX = 100_000
+
+function WatcherMaxEventsSetting() {
+  const qc = useQueryClient()
+  const { data } = useQuery({
+    queryKey: ['watcher-max-events'],
+    queryFn: api.getWatcherMaxEvents,
+  })
+  const [input, setInput] = useState<string>('')
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (data?.watcher_max_events != null) setInput(String(data.watcher_max_events))
+  }, [data?.watcher_max_events])
+
+  const mutation = useMutation({
+    mutationFn: (v: number) => api.setWatcherMaxEvents(v),
+    onSuccess: () => {
+      setSaved(true)
+      setError(null)
+      qc.invalidateQueries({ queryKey: ['watcher-max-events'] })
+    },
+    onError: (err: unknown) => {
+      setSaved(false)
+      setError(err instanceof Error ? err.message : String(err))
+    },
+  })
+
+  const parsed = Number(input)
+  const valid =
+    Number.isInteger(parsed) &&
+    parsed >= WATCHER_MAX_EVENTS_MIN &&
+    parsed <= WATCHER_MAX_EVENTS_MAX
+  const unchanged = parsed === (data?.watcher_max_events ?? -1)
+  const saveDisabled = !valid || unchanged || mutation.isPending
+
+  return (
+    <div className="border border-gray-700 rounded-lg px-3 py-2.5 space-y-2">
+      <div>
+        <p className="text-sm text-gray-300">Watchers — Stored Events Max</p>
+        <p className="text-xs text-gray-500">
+          The maximum number of triggered events stored (and served on the public
+          feed) per watcher. Older events beyond this cap are pruned. Range{' '}
+          {WATCHER_MAX_EVENTS_MIN.toLocaleString()}–
+          {WATCHER_MAX_EVENTS_MAX.toLocaleString()}. Default 1,000. Takes effect
+          on the next watcher evaluation (no restart).
+        </p>
+      </div>
+      <div className="flex items-center gap-2">
+        <input
+          type="number"
+          min={WATCHER_MAX_EVENTS_MIN}
+          max={WATCHER_MAX_EVENTS_MAX}
+          className="input w-32 tabular-nums"
+          value={input}
+          onChange={e => { setInput(e.target.value); setSaved(false); setError(null) }}
+        />
+        <button
+          className="btn-primary text-xs"
+          disabled={saveDisabled}
+          onClick={() => mutation.mutate(parsed)}
+        >
+          {mutation.isPending ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+      {!valid && input !== '' && (
+        <p className="text-xs text-red-400">
+          Must be an integer between {WATCHER_MAX_EVENTS_MIN.toLocaleString()} and{' '}
+          {WATCHER_MAX_EVENTS_MAX.toLocaleString()}.
+        </p>
+      )}
+      {error && <p className="text-xs text-red-400">{error}</p>}
+      {saved && !error && <p className="text-xs text-green-400">Saved.</p>}
+    </div>
+  )
+}
+
+// ── Branding logo (prompts-045) ──────────────────────────────────────────────
 const LOGO_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif'
 const LOGO_ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
 const LOGO_MAX_BYTES = 2 * 1024 * 1024

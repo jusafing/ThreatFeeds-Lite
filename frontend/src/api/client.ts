@@ -610,6 +610,14 @@ export const api = {
       body: JSON.stringify({ pagination_max: value }),
     }),
 
+  // Application — per-watcher stored/feed event cap (issue_local_006)
+  getWatcherMaxEvents: () => request<{ watcher_max_events: number }>('/app/watcher-max-events'),
+  setWatcherMaxEvents: (value: number) =>
+    request<{ watcher_max_events: number }>('/app/watcher-max-events', {
+      method: 'PUT',
+      body: JSON.stringify({ watcher_max_events: value }),
+    }),
+
   // Application — branding logo (prompts-045)
   getLogoInfo: () => request<{ has_logo: boolean }>('/app/logo-info'),
   uploadLogo: async (file: File): Promise<{ logo_path: string; has_logo: boolean }> => {
@@ -830,6 +838,41 @@ export const api = {
     diff: (fromId: number, toId: number) =>
       request<MappingVersionDiffResponse>(
         `/normalizer/mappings/diff?from=${fromId}&to=${toId}`,
+      ),
+  },
+
+  // Watchers (issue_local_006) — admin CRUD + triggered-event reader.
+  watchers: {
+    list: () => request<Watcher[]>('/watchers'),
+    get: (id: string) => request<Watcher>(`/watchers/${encodeURIComponent(id)}`),
+    create: (body: WatcherInput) =>
+      request<Watcher>('/watchers', { method: 'POST', body: JSON.stringify(body) }),
+    update: (id: string, body: WatcherInput) =>
+      request<Watcher>(`/watchers/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      }),
+    setEnabled: (id: string, enabled: boolean) =>
+      request<Watcher>(`/watchers/${encodeURIComponent(id)}/enabled`, {
+        method: 'PUT',
+        body: JSON.stringify({ enabled }),
+      }),
+    remove: (id: string) =>
+      request<void>(`/watchers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    events: (id: string, params: { limit?: number; offset?: number } = {}) => {
+      const q = new URLSearchParams()
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== null) q.set(k, String(v))
+      })
+      const qs = q.toString()
+      return request<WatcherEventsPage>(
+        `/watchers/${encodeURIComponent(id)}/events${qs ? `?${qs}` : ''}`,
+      )
+    },
+    metaFeeds: () => request<{ feeds: string[] }>('/watchers/meta/feeds'),
+    metaFields: (dataset: WatcherDataset = 'all') =>
+      request<{ fields: string[] }>(
+        `/watchers/meta/fields?dataset=${encodeURIComponent(dataset)}`,
       ),
   },
 }
@@ -1188,4 +1231,53 @@ export interface MappingVersionDiffResponse {
   from: { id: number; source_name: string }
   to: { id: number; source_name: string }
   diff: MappingVersionDiff
+}
+
+// ── Watchers (issue_local_006) ─────────────────────────────────────────────
+
+export type WatcherSeverity = 'low' | 'medium' | 'high' | 'critical'
+export type WatcherDataset = 'all' | 'raw' | 'normalized'
+export type WatcherMode = 'realtime' | 'scheduled'
+export type WatcherFormat = 'json' | 'csv' | 'xml'
+export type WatcherMatchType = 'exact' | 'wildcard' | 'regex'
+
+export interface WatcherCondition {
+  field: string
+  value: string
+  match_type: WatcherMatchType
+}
+
+export interface WatcherInput {
+  name: string
+  severity: WatcherSeverity
+  dataset: WatcherDataset
+  feeds: string[]
+  conditions: WatcherCondition[]
+  mode: WatcherMode
+  interval_sec: number
+  format: WatcherFormat
+  max_feed_events: number
+  enabled: boolean
+}
+
+export interface Watcher extends WatcherInput {
+  id: string
+  trigger_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface WatcherEvent {
+  id: number
+  watcher_id: string
+  dataset: string
+  source_entry_id: number
+  source_name: string | null
+  triggered_at: string
+  event: Record<string, unknown>
+}
+
+export interface WatcherEventsPage {
+  events: WatcherEvent[]
+  total: number
 }

@@ -319,8 +319,59 @@ def save_app_pagination_max(value: int) -> None:
     _write_yaml(APP_CONFIG_PATH, data)
 
 
-# ── Authentication toggle (prompts-045) ──────────────────────────────────────
+# ── Watcher event retention cap (issue_local_006) ────────────────────────────
 
+# Global ceiling on how many triggered events each watcher retains, and the
+# hard limit for the Watcher Details full-list view. Default 1000, bounded.
+_WATCHER_MAX_EVENTS_DEFAULT = 1000
+_WATCHER_MAX_EVENTS_MIN = 10
+_WATCHER_MAX_EVENTS_MAX = 100_000
+
+
+def load_watcher_max_events() -> int:
+    """Return the configured per-watcher event retention cap (default 1000).
+
+    Non-integer or out-of-range values on disk fall back to the default with a
+    warning, so a malformed config never breaks watcher evaluation.
+    """
+    raw = load_app_config().get("watcher_max_events", _WATCHER_MAX_EVENTS_DEFAULT)
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "watcher_max_events in %s is not an integer (%r); using default %d",
+            APP_CONFIG_PATH, raw, _WATCHER_MAX_EVENTS_DEFAULT,
+        )
+        return _WATCHER_MAX_EVENTS_DEFAULT
+    if n < _WATCHER_MAX_EVENTS_MIN or n > _WATCHER_MAX_EVENTS_MAX:
+        logger.warning(
+            "watcher_max_events=%d is out of range [%d, %d]; using default %d",
+            n, _WATCHER_MAX_EVENTS_MIN, _WATCHER_MAX_EVENTS_MAX,
+            _WATCHER_MAX_EVENTS_DEFAULT,
+        )
+        return _WATCHER_MAX_EVENTS_DEFAULT
+    return n
+
+
+def save_watcher_max_events(value: int) -> None:
+    """Persist the per-watcher event retention cap to application.yaml.
+
+    Raises ValueError when the value is not an integer in the supported range.
+    Booleans are rejected explicitly (bool is a subclass of int).
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("watcher_max_events must be an integer")
+    if value < _WATCHER_MAX_EVENTS_MIN or value > _WATCHER_MAX_EVENTS_MAX:
+        raise ValueError(
+            f"watcher_max_events must be between {_WATCHER_MAX_EVENTS_MIN} "
+            f"and {_WATCHER_MAX_EVENTS_MAX}"
+        )
+    data = load_app_config()
+    data["watcher_max_events"] = value
+    _write_yaml(APP_CONFIG_PATH, data)
+
+
+# ── Authentication toggle (prompts-045) ──────────────────────────────────────
 # Env-var override set by threatfeeds-lite --enable-auth at uvicorn
 # invocation time. Takes precedence over application.yaml on read.
 #   - absent              → read application.yaml (default false)

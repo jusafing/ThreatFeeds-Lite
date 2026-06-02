@@ -3,6 +3,7 @@ import ProtectedLayout from './components/ProtectedLayout'
 import Viewer from './pages/Viewer'
 import Configuration from './pages/Configuration'
 import Normalizer from './pages/Normalizer'
+import Watchers from './pages/Watchers'
 import Account from './pages/Account'
 import About from './pages/About'
 import Login from './pages/Login'
@@ -29,6 +30,7 @@ const PAGE_COMPONENTS: Record<ShellRoute, React.ComponentType> = {
   viewer: Viewer,
   configuration: Configuration,
   normalizer: Normalizer,
+  watchers: Watchers,
   account: Account,
   about: About,
 }
@@ -47,7 +49,7 @@ const PAGE_COMPONENTS: Record<ShellRoute, React.ComponentType> = {
 //   - RequireAdmin lets every page through (the app is fully open), and
 //   - RequireAuthEnabled redirects the account page to /viewer (there is no
 //     signed-in user to manage when auth is off).
-const ADMIN_ONLY_ROUTES = new Set<ShellRoute>(['configuration', 'normalizer'])
+const ADMIN_ONLY_ROUTES = new Set<ShellRoute>(['configuration', 'normalizer', 'watchers'])
 const AUTH_ENABLED_ROUTES = new Set<ShellRoute>(['account'])
 
 function RequireAdmin({ children }: { children: React.ReactElement }) {

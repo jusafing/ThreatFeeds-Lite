@@ -5,6 +5,7 @@ import {
   LayoutDashboard,
   Settings,
   Sparkles,
+  Eye,
   UserCircle,
   Info,
   LogOut,
@@ -32,6 +33,7 @@ const navItems = [
   { to: 'viewer',        label: 'Viewer',        icon: LayoutDashboard, adminOnly: false, authOnly: false },
   { to: 'configuration', label: 'Configuration', icon: Settings,        adminOnly: true,  authOnly: false },
   { to: 'normalizer',    label: 'Normalizer',    icon: Sparkles,        adminOnly: true,  authOnly: false },
+  { to: 'watchers',      label: 'Watchers',      icon: Eye,             adminOnly: true,  authOnly: false },
   { to: 'account',       label: 'Account',       icon: UserCircle,      adminOnly: false, authOnly: true },
   { to: 'about',         label: 'About',         icon: Info,            adminOnly: false, authOnly: false },
 ]

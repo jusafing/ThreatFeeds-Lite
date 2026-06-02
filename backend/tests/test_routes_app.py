@@ -117,8 +117,46 @@ def test_put_pagination_max_rejects_missing_key(client):
     assert resp.status_code == 400
 
 
-# ── branding logo (prompts-045) ──────────────────────────────────────────────
+# ── watcher_max_events (issue_local_006) ─────────────────────────────────────
 
+
+def test_get_watcher_max_events_default(client):
+    resp = client.get("/api/app/watcher-max-events")
+    assert resp.status_code == 200
+    assert resp.json() == {"watcher_max_events": 1000}
+
+
+def test_put_watcher_max_events_round_trip(client):
+    resp = client.put("/api/app/watcher-max-events", json={"watcher_max_events": 250})
+    assert resp.status_code == 200
+    assert resp.json() == {"watcher_max_events": 250}
+    assert "restart_required" not in resp.json()
+    resp2 = client.get("/api/app/watcher-max-events")
+    assert resp2.json() == {"watcher_max_events": 250}
+
+
+@pytest.mark.parametrize("bad", [9, 0, -1, 100_001, 999_999])
+def test_put_watcher_max_events_rejects_out_of_range(client, bad):
+    resp = client.put("/api/app/watcher-max-events", json={"watcher_max_events": bad})
+    assert resp.status_code == 400
+
+
+def test_put_watcher_max_events_rejects_non_int(client):
+    resp = client.put("/api/app/watcher-max-events", json={"watcher_max_events": "100"})
+    assert resp.status_code == 400
+
+
+def test_put_watcher_max_events_rejects_bool(client):
+    resp = client.put("/api/app/watcher-max-events", json={"watcher_max_events": True})
+    assert resp.status_code == 400
+
+
+def test_put_watcher_max_events_rejects_missing_key(client):
+    resp = client.put("/api/app/watcher-max-events", json={})
+    assert resp.status_code == 400
+
+
+# ── branding logo (prompts-045) ──────────────────────────────────────────────
 # 1x1 transparent PNG.
 _PNG_BYTES = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
