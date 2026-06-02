@@ -39,11 +39,43 @@ pass_read=...
 
 Real `.env*` files are **gitignored** — only `.env.example` is committed.
 
+### Targeting the server
+
+You can point the runner at the server in one of two ways:
+
+- **`host` + `port`** — plain HTTP to `http://host:port` (the default above).
+- **`url`** — a full base URL **including the scheme**. Use this for HTTPS or
+  when the server is behind a reverse proxy / path prefix (an alias), e.g.:
+
+  ```
+  url=https://threats.example.com
+  url=https://proxy.example.com/threatfeeds   # reverse-proxy alias
+  ```
+
+A `url` **must** include `http://` or `https://` (otherwise the runner exits
+with an error); a trailing slash is stripped. If both `url` and `host`/`port`
+are set, **`url` wins** and host/port are ignored (with a warning).
+
+### Self-signed / untrusted TLS
+
+To accept a self-signed or otherwise untrusted certificate, set
+`skip_tls_verify=true` in the env file (truthy: `1`, `true`, `yes`, `on`) or
+pass `-k` / `--insecure` on the command line:
+
+```bash
+./run_tests.sh -k                       # or --insecure
+```
+
+> **Security:** this disables certificate verification for the entire run and
+> exposes the session to man-in-the-middle attacks. Only use it on trusted
+> networks against a server whose identity you can otherwise vouch for.
+
 **2. Run the plan.**
 
 ```bash
 ./run_tests.sh                      # uses ./.env.test
 ./run_tests.sh --env /path/to.env   # or point at another env file
+./run_tests.sh -k                   # also skip TLS cert verification (insecure)
 ```
 
 **3. Inspect the results.** Each run creates a fresh `test-client-<epoch>/`

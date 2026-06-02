@@ -55,6 +55,7 @@ import argparse
 import getpass
 import http.cookiejar
 import json
+import ssl
 import sys
 import urllib.error
 import urllib.parse
@@ -73,10 +74,24 @@ _FIELD_HELP = (
 )
 
 
-def build_opener() -> urllib.request.OpenerDirector:
-    """Return an opener with an in-memory cookie jar (carries the session)."""
+def build_opener(insecure: bool = False) -> urllib.request.OpenerDirector:
+    """Return an opener with an in-memory cookie jar (carries the session).
+
+    When ``insecure`` is true, TLS certificate verification is disabled for
+    HTTPS requests (accepts self-signed / untrusted certificates). This removes
+    protection against man-in-the-middle attacks — use only against trusted
+    self-signed or development endpoints.
+    """
     jar = http.cookiejar.CookieJar()
-    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    handlers: list[urllib.request.BaseHandler] = [
+        urllib.request.HTTPCookieProcessor(jar),
+    ]
+    if insecure:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    return urllib.request.build_opener(*handlers)
 
 
 def build_url(base: str, path: str, params: dict[str, object] | None = None) -> str:
@@ -195,7 +210,7 @@ def _maybe_login(opener: urllib.request.OpenerDirector, args: argparse.Namespace
 
 
 def cmd_get_raw(args: argparse.Namespace) -> int:
-    opener = build_opener()
+    opener = build_opener(args.insecure)
     _maybe_login(opener, args)
     events = fetch_events(
         opener, args.url, "/api/viewer/entries", args.feeds, args.max,
@@ -206,7 +221,7 @@ def cmd_get_raw(args: argparse.Namespace) -> int:
 
 
 def cmd_get_normalized(args: argparse.Namespace) -> int:
-    opener = build_opener()
+    opener = build_opener(args.insecure)
     _maybe_login(opener, args)
     events = fetch_events(
         opener, args.url, "/api/normalizer/entries", args.feeds, args.max,
@@ -218,7 +233,7 @@ def cmd_get_normalized(args: argparse.Namespace) -> int:
 
 def cmd_send(args: argparse.Namespace) -> int:
     payload = _read_send_payload(args)
-    opener = build_opener()
+    opener = build_opener(args.insecure)
     _maybe_login(opener, args)
     response = http_post_json(opener, build_url(args.url, "/api/ingest/listener"), payload)
     print(json.dumps(response))
@@ -227,7 +242,7 @@ def cmd_send(args: argparse.Namespace) -> int:
 
 def cmd_search(args: argparse.Namespace) -> int:
     """Full-text search the raw or normalized table via the ``?search=`` param."""
-    opener = build_opener()
+    opener = build_opener(args.insecure)
     _maybe_login(opener, args)
     path = ENTRIES_PATHS[args.type]
     events = fetch_events(
@@ -241,7 +256,7 @@ def cmd_search(args: argparse.Namespace) -> int:
 def cmd_query(args: argparse.Namespace) -> int:
     """Natural-language query: the server's LLM translates the question into a
     constrained filter, runs it against the local DB, and returns the rows."""
-    opener = build_opener()
+    opener = build_opener(args.insecure)
     _maybe_login(opener, args)
     body: dict[str, object] = {"question": args.question}
     if args.type:
@@ -257,7 +272,7 @@ def cmd_query(args: argparse.Namespace) -> int:
 
 def cmd_list_feeds(args: argparse.Namespace) -> int:
     """List available feeds (per-source entry counts) from the summary endpoint."""
-    opener = build_opener()
+    opener = build_opener(args.insecure)
     _maybe_login(opener, args)
     summary = http_get_json(opener, build_url(args.url, SUMMARY_PATHS[args.type]))
     print(json.dumps(summary))
@@ -281,11 +296,19 @@ def build_parser() -> argparse.ArgumentParser:
             "  api_client.py get-normalized --field cve_id=CVE-2026-0001\n"
             "  api_client.py query \"critical CVEs from 2026 affecting nginx\"\n"
             "  api_client.py list-feeds\n"
+            "  api_client.py --url https://host/alias --insecure get-raw   # self-signed TLS\n"
         ),
     )
     parser.add_argument(
         "--url", default=DEFAULT_URL,
         help=f"Base API endpoint URL (default: {DEFAULT_URL})",
+    )
+    parser.add_argument(
+        "--insecure", "-k", action="store_true",
+        help=(
+            "Skip TLS certificate verification for HTTPS (accept self-signed / "
+            "untrusted certs). Disables MITM protection — trusted/dev use only."
+        ),
     )
     parser.add_argument(
         "--username", "-u", default=None,
