@@ -153,9 +153,9 @@ async def test_evaluate_normalized_records_matches(monkeypatch):
     assert len(events) == 2
     assert {e["source_entry_id"] for e in events} == {1, 3}
     assert all(e["dataset"] == "normalized" for e in events)
-    # High-water advanced to max id seen.
-    w = await store.get_watcher(watcher["id"])
-    assert w["last_eval_norm_id"] == 3
+    # High-water advanced per-source to the max id seen for that source.
+    hw = await store.get_high_water_map(watcher["id"], "normalized")
+    assert hw == {"feed-a": 3}
 
 
 @pytest.mark.asyncio
@@ -186,6 +186,53 @@ async def test_evaluate_dataset_all_scans_both(monkeypatch):
     assert n == 2
     datasets = {e["dataset"] for e in await store.list_events(watcher["id"])}
     assert datasets == {"raw", "normalized"}
+
+
+@pytest.mark.asyncio
+async def test_evaluate_two_sources_with_overlapping_ids_both_trigger(monkeypatch):
+    """review_02b: raw `entries` ids are per-source sequences. Two feeds each
+    emitting id 1 must BOTH trigger (no global high-water collision) and the
+    high-water mark advances independently per source."""
+    watcher = await store.create_watcher({
+        "name": "Raw Both", "severity": "high", "dataset": "raw",
+        "feeds": [], "conditions": [{"field": "severity", "value": "high", "match_type": "exact"}],
+        "mode": "realtime", "enabled": True,
+    })
+    raw_rows = [
+        {"id": 1, "severity": "high", "source": "feed-a"},
+        {"id": 1, "severity": "high", "source": "feed-b"},
+    ]
+    monkeypatch.setattr(engine, "query_entries", _const(raw_rows))
+    monkeypatch.setattr(engine, "query_normalized", _const([]))
+
+    n = await engine.evaluate_watcher(await store.get_watcher(watcher["id"]), {"raw"})
+    assert n == 2  # both id-1 rows trigger despite identical id
+    assert await store.get_high_water_map(watcher["id"], "raw") == {"feed-a": 1, "feed-b": 1}
+    # Re-scan: each source's id 1 is not > its own mark of 1 -> nothing new.
+    assert await engine.evaluate_watcher(await store.get_watcher(watcher["id"]), {"raw"}) == 0
+
+
+@pytest.mark.asyncio
+async def test_any_field_match_excludes_internal_columns(monkeypatch):
+    """review_02b: the any-field ('*') token searches real fields but must skip
+    internal serialization columns (raw blob, dedup_key, etc.)."""
+    watcher = await store.create_watcher({
+        "name": "Any Hit", "severity": "high", "dataset": "raw",
+        "feeds": [], "conditions": [{"field": "*", "value": "needle", "match_type": "exact"}],
+        "mode": "realtime", "enabled": True,
+    })
+    rows = [
+        # 'needle' only appears inside the internal raw blob -> must NOT match.
+        {"id": 1, "severity": "high", "source": "feed-a", "raw": "needle in raw", "actor": "APT1"},
+        # 'needle' in a real custom field -> matches.
+        {"id": 2, "severity": "high", "source": "feed-a", "actor": "needle"},
+    ]
+    monkeypatch.setattr(engine, "query_entries", _const(rows))
+    monkeypatch.setattr(engine, "query_normalized", _const([]))
+
+    n = await engine.evaluate_watcher(await store.get_watcher(watcher["id"]), {"raw"})
+    assert n == 1
+    assert {e["source_entry_id"] for e in await store.list_events(watcher["id"])} == {2}
 
 
 @pytest.mark.asyncio

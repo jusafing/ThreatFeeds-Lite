@@ -77,11 +77,15 @@ async def meta_fields(
 ) -> dict[str, list[str]]:
     """Return the matchable field names for a dataset (all|raw|normalized).
 
-    Used to populate the wizard's field dropdown. When ``feeds`` are supplied,
-    the field list is derived by sampling recent stored events for exactly those
-    feeds — so custom/extra-JSON fields that only appear in specific sources are
-    offered. With no feeds (or when sampling finds nothing) we fall back to the
-    static schema column lists.
+    Used to populate the wizard's field dropdown. The list is derived by
+    sampling recent stored events so custom/extra-JSON fields that only appear
+    in specific sources are offered:
+      * When ``feeds`` are supplied, only those feeds are sampled.
+      * When no feeds are supplied, ALL feeds are sampled (the full union across
+        sources), so the dropdown shows every available field rather than a
+        subset.
+    Falls back to the static schema column lists only when sampling yields
+    nothing (e.g. an empty database).
     """
     ds = (dataset or "all").strip().lower()
     selected = [f for f in (feeds or []) if f and f.strip()]
@@ -98,19 +102,25 @@ async def meta_fields(
     raw_fields: set[str] = set()
     norm_fields: set[str] = set()
 
-    if selected:
-        if ds in ("raw", "all"):
-            for feed in selected:
-                rows = await query_entries(
-                    source_name=feed, limit=_FIELD_SAMPLE_PER_FEED
-                )
-                raw_fields |= _keys_from(rows)
-        if ds in ("normalized", "all"):
-            for feed in selected:
-                rows = await query_normalized(
-                    source_name=feed, limit=_FIELD_SAMPLE_PER_FEED
-                )
-                norm_fields |= _keys_from(rows)
+    # Feeds to sample: the selection, or — when none chosen — every source so
+    # the union covers all fields across all feeds.
+    if ds in ("raw", "all"):
+        raw_feeds = selected or _get_all_sources()
+        for feed in raw_feeds:
+            rows = await query_entries(source_name=feed, limit=_FIELD_SAMPLE_PER_FEED)
+            raw_fields |= _keys_from(rows)
+    if ds in ("normalized", "all"):
+        if selected:
+            norm_feeds = selected
+        else:
+            norm_feeds = [
+                r["source"]
+                for r in await get_normalized_summary()
+                if r.get("source") and r["source"] != "__total__"
+            ]
+        for feed in norm_feeds:
+            rows = await query_normalized(source_name=feed, limit=_FIELD_SAMPLE_PER_FEED)
+            norm_fields |= _keys_from(rows)
 
     # Fall back to the static schema for any side that produced nothing.
     if ds == "raw":

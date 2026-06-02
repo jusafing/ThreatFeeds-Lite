@@ -37,6 +37,15 @@ logger = logging.getLogger("backend.watchers")
 # A field token meaning "match against any field value in the row".
 _ANY_FIELD_TOKENS = frozenset({"", "*", "all", "any"})
 
+# Internal/serialization columns never matched by an "any field" condition.
+# These are not real data fields — ``raw``/``normalized`` hold the entire
+# serialized event, so matching them would make any-field match almost anything.
+# Mirrors ``routes_watchers._FIELD_HIDDEN`` so the wizard's offered fields and
+# the engine's any-field scan agree.
+_HIDDEN_MATCH_KEYS = frozenset(
+    {"id", "dedup_key", "normalized", "extra", "extra_norm", "raw"}
+)
+
 # Hard ceiling on a regex/value length we will attempt to match, as a cheap
 # guard against pathological patterns.
 _MAX_MATCH_LEN = 4000
@@ -81,9 +90,10 @@ def _row_matches_condition(row: dict[str, Any], cond: dict[str, str]) -> bool:
     value = cond.get("value", "")
     match_type = cond.get("match_type", "exact")
     if field in _ANY_FIELD_TOKENS:
-        # Match if ANY field value in the row satisfies the condition.
-        for v in row.values():
-            if v is None:
+        # Match if ANY real data field in the row satisfies the condition.
+        # Internal serialization columns are skipped (see _HIDDEN_MATCH_KEYS).
+        for key, v in row.items():
+            if key in _HIDDEN_MATCH_KEYS or v is None:
                 continue
             if _condition_value_matches(str(v), value, match_type):
                 return True
@@ -126,20 +136,30 @@ async def _candidate_rows(dataset: str, feeds: list[str], window: int) -> list[d
     return await query_normalized(source_name=single, limit=window)
 
 
-def _new_rows(rows: Iterable[dict[str, Any]], high_water: int) -> tuple[list[dict[str, Any]], int]:
-    """Filter to rows with id > high_water; return (rows, new_high_water)."""
+def _new_rows_by_source(
+    rows: Iterable[dict[str, Any]], hw_map: dict[str, int]
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Split candidate rows into those newer than their per-source high-water.
+
+    Raw ``entries`` ids are independent per-source sequences, so freshness must
+    be judged per source, not against a single global mark. Returns
+    ``(fresh_rows, new_marks)`` where ``new_marks`` maps source_name -> the max
+    id observed for that source this pass (>= the prior mark).
+    """
     fresh: list[dict[str, Any]] = []
-    max_id = high_water
+    new_marks: dict[str, int] = {}
     for row in rows:
         try:
             rid = int(row.get("id", 0))
         except (TypeError, ValueError):
             continue
-        if rid > high_water:
+        src = _row_source(row)
+        hw = int(hw_map.get(src, 0))
+        if rid > hw:
             fresh.append(row)
-        if rid > max_id:
-            max_id = rid
-    return fresh, max_id
+        if rid > int(new_marks.get(src, hw)):
+            new_marks[src] = rid
+    return fresh, new_marks
 
 
 async def evaluate_watcher(watcher: dict[str, Any], datasets: set[str]) -> int:
@@ -149,6 +169,10 @@ async def evaluate_watcher(watcher: dict[str, Any], datasets: set[str]) -> int:
     {"normalized"}, or {"raw","normalized"}. A watcher with dataset="all" scans
     whichever of these its trigger covers; a watcher with dataset="raw" only
     scans "raw" even if "normalized" is requested.
+
+    High-water marks are tracked per (watcher, dataset, source) so a feed whose
+    ids sit below another feed's high id is never skipped (issue_local_006
+    review_02b).
     """
     if not watcher.get("enabled"):
         return 0
@@ -163,18 +187,16 @@ async def evaluate_watcher(watcher: dict[str, Any], datasets: set[str]) -> int:
     feeds = list(watcher.get("feeds") or [])
 
     triggers: list[dict[str, Any]] = []
-    new_raw_id: int | None = None
-    new_norm_id: int | None = None
+    marks_by_ds: dict[str, dict[str, int]] = {}
 
     for ds in scan:
-        hw_key = "last_eval_raw_id" if ds == "raw" else "last_eval_norm_id"
-        high_water = int(watcher.get(hw_key, 0) or 0)
+        hw_map = await store.get_high_water_map(wid, ds)
         try:
             rows = await _candidate_rows(ds, feeds, window)
         except Exception as exc:  # pragma: no cover — defensive
             logger.error("watcher %s: candidate fetch failed for %s: %s", wid, ds, exc)
             continue
-        fresh, max_id = _new_rows(rows, high_water)
+        fresh, new_marks = _new_rows_by_source(rows, hw_map)
         for row in fresh:
             if row_matches(row, watcher):
                 triggers.append({
@@ -183,17 +205,15 @@ async def evaluate_watcher(watcher: dict[str, Any], datasets: set[str]) -> int:
                     "source_name": _row_source(row),
                     "event": row,
                 })
-        if ds == "raw":
-            new_raw_id = max_id
-        else:
-            new_norm_id = max_id
+        marks_by_ds[ds] = new_marks
 
     inserted = 0
     if triggers:
         inserted = await store.record_triggers(wid, triggers, max_events=max_events)
         if inserted:
             logger.info("watcher %s triggered on %d new event(s)", wid, inserted)
-    await store.update_high_water(wid, raw_id=new_raw_id, norm_id=new_norm_id)
+    for ds, new_marks in marks_by_ds.items():
+        await store.update_high_water_map(wid, ds, new_marks)
     return inserted
 
 

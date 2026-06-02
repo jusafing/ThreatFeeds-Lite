@@ -204,6 +204,82 @@ async def test_high_water_only_advances():
     assert w["last_eval_norm_id"] == 9
 
 
+@pytest.mark.asyncio
+async def test_high_water_map_is_per_source_and_only_advances():
+    await store.create_watcher(_defn())
+    assert await store.get_high_water_map("critical-cves", "raw") == {}
+    await store.update_high_water_map("critical-cves", "raw", {"feed-a": 10, "feed-b": 3})
+    assert await store.get_high_water_map("critical-cves", "raw") == {"feed-a": 10, "feed-b": 3}
+    # Independent per source; lower values never move a mark backwards.
+    await store.update_high_water_map("critical-cves", "raw", {"feed-a": 4, "feed-b": 7})
+    assert await store.get_high_water_map("critical-cves", "raw") == {"feed-a": 10, "feed-b": 7}
+    # Datasets are tracked separately.
+    assert await store.get_high_water_map("critical-cves", "normalized") == {}
+
+
+@pytest.mark.asyncio
+async def test_record_triggers_dedup_is_per_source():
+    """Same source_entry_id in different feeds are distinct events; same id in
+    the same feed dedups (review_02b: dedup key includes source_name)."""
+    await store.create_watcher(_defn())
+    rows = [
+        {"dataset": "raw", "source_entry_id": 1, "source_name": "feed-a", "event": {"id": 1}},
+        {"dataset": "raw", "source_entry_id": 1, "source_name": "feed-b", "event": {"id": 1}},
+    ]
+    n1 = await store.record_triggers("critical-cves", rows, max_events=100)
+    assert n1 == 2  # not collapsed despite identical id
+    n2 = await store.record_triggers("critical-cves", rows, max_events=100)
+    assert n2 == 0  # now deduped per (watcher, dataset, id, source)
+    assert await store.count_events("critical-cves") == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_high_water(monkeypatch):
+    await store.create_watcher(_defn())
+    await store.update_high_water_map("critical-cves", "raw", {"feed-a": 5})
+    assert await store.delete_watcher("critical-cves") is True
+    assert await store.get_high_water_map("critical-cves", "raw") == {}
+
+
+@pytest.mark.asyncio
+async def test_migration_v1_to_v2(tmp_path, monkeypatch):
+    """A pre-existing v1 DB (global dedup index, no high_water table) is migrated
+    forward idempotently to v2."""
+    db_path = tmp_path / "legacy.db"
+    monkeypatch.setattr(store, "_WATCHERS_DB_PATH", db_path)
+    # Build a minimal v1 schema by hand.
+    conn = sqlite3.connect(db_path)
+    conn.executescript(store.CREATE_WATCHERS_TABLE)
+    conn.executescript(store.CREATE_WATCHER_EVENTS_TABLE)
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_watcher_events_dedup "
+        "ON watcher_events (watcher_id, dataset, source_entry_id)"
+    )
+    conn.executescript(store.CREATE_SCHEMA_VERSION_TABLE)
+    conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+    conn.commit()
+    conn.close()
+
+    # init runs the migration.
+    await store.init_watchers_db()
+
+    conn = sqlite3.connect(db_path)
+    ver = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+    assert ver == 2
+    # high_water table now exists.
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "watcher_high_water" in tables
+    # dedup index now includes source_name.
+    idx_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_watcher_events_dedup'"
+    ).fetchone()[0]
+    assert "source_name" in idx_sql
+    conn.close()
+
+    # Idempotent: a second init is a no-op.
+    await store.init_watchers_db()
+
+
 def test_list_scheduled_watchers_sync_missing_db_is_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "_WATCHERS_DB_PATH", tmp_path / "nope.db")
     assert store.list_scheduled_watchers_sync() == []

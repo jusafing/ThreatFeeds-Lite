@@ -172,6 +172,34 @@ def test_meta_fields_feed_aware_unions_multiple_feeds(client, monkeypatch):
     assert "field_a" in fields and "field_b" in fields
 
 
+def test_meta_fields_no_feed_samples_union_of_all_sources(client, monkeypatch):
+    # review_02b: with NO feed selected, every source is sampled so custom
+    # fields from any feed appear (not just the static schema subset).
+    async def _fake_entries(source_name=None, limit=500, **kw):
+        return {
+            "feed-a": [{"id": 1, "custom_a": "x"}],
+            "feed-b": [{"id": 2, "custom_b": "y"}],
+        }.get(source_name, [])
+
+    async def _fake_norm(source_name=None, limit=500, **kw):
+        return []
+
+    async def _fake_summary():
+        return []
+
+    monkeypatch.setattr(routes_watchers, "_get_all_sources", lambda: ["feed-a", "feed-b"])
+    monkeypatch.setattr(routes_watchers, "query_entries", _fake_entries)
+    monkeypatch.setattr(routes_watchers, "query_normalized", _fake_norm)
+    monkeypatch.setattr(routes_watchers, "get_normalized_summary", _fake_summary)
+
+    r = client.get("/api/watchers/meta/fields", params={"dataset": "raw"})
+    assert r.status_code == 200
+    fields = r.json()["fields"]
+    # Custom fields from BOTH sources surface even with no feed filter.
+    assert "custom_a" in fields and "custom_b" in fields
+    assert "extra" not in fields and "raw" not in fields
+
+
 def test_events_endpoint_returns_triggers(client):
     client.post("/api/watchers", json=_payload())
     # Seed triggered events directly through the store.

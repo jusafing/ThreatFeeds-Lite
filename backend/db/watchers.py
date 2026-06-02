@@ -39,8 +39,13 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _WATCHERS_DB_PATH = _PROJECT_ROOT / "data" / "watchers.db"
 
-# Bump if the table shape changes. v1 is the initial schema.
-_WATCHERS_SCHEMA_VERSION = 1
+# Bump if the table shape changes.
+#   v1 — initial schema.
+#   v2 — per-source high-water table + dedup index now includes source_name
+#        (issue_local_006 review_02b: raw entry ids are per-source sequences, so
+#        a single global high-water mark and a source-less dedup key were both
+#        incorrect across feeds).
+_WATCHERS_SCHEMA_VERSION = 2
 
 VALID_DATASETS: frozenset[str] = frozenset({"all", "raw", "normalized"})
 VALID_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high", "critical"})
@@ -92,12 +97,27 @@ CREATE TABLE IF NOT EXISTS watcher_events (
 
 CREATE_WATCHER_EVENTS_DEDUP_INDEX = """
 CREATE UNIQUE INDEX IF NOT EXISTS idx_watcher_events_dedup
-ON watcher_events (watcher_id, dataset, source_entry_id);
+ON watcher_events (watcher_id, dataset, source_entry_id, source_name);
 """
 
 CREATE_WATCHER_EVENTS_LOOKUP_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_watcher_events_lookup
 ON watcher_events (watcher_id, id DESC);
+"""
+
+# Per-source high-water marks. Raw `entries` ids are independent per-source
+# sequences, so a single global mark on the watchers row is wrong (it blocks
+# triggering for any feed whose ids fall below the global max). We track the
+# last-evaluated id per (watcher, dataset, source). The consolidated normalized
+# store uses a single logical source key of '' (empty string).
+CREATE_WATCHER_HIGH_WATER_TABLE = """
+CREATE TABLE IF NOT EXISTS watcher_high_water (
+    watcher_id  TEXT    NOT NULL,
+    dataset     TEXT    NOT NULL,
+    source_name TEXT    NOT NULL DEFAULT '',
+    last_id     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (watcher_id, dataset, source_name)
+);
 """
 
 CREATE_SCHEMA_VERSION_TABLE = """
@@ -125,23 +145,52 @@ def slugify(name: str) -> str:
 
 
 async def init_watchers_db() -> None:
-    """Create the watcher tables + schema_version row if missing. Idempotent."""
+    """Create the watcher tables + schema_version row if missing, and run
+    forward migrations. Idempotent."""
     _WATCHERS_DB_PATH.parent.mkdir(exist_ok=True)
     async with aiosqlite.connect(_WATCHERS_DB_PATH) as db:
         await db.execute(CREATE_WATCHERS_TABLE)
         await db.execute(CREATE_WATCHER_EVENTS_TABLE)
-        await db.execute(CREATE_WATCHER_EVENTS_DEDUP_INDEX)
+        await db.execute(CREATE_WATCHER_HIGH_WATER_TABLE)
         await db.execute(CREATE_WATCHER_EVENTS_LOOKUP_INDEX)
         await db.execute(CREATE_SCHEMA_VERSION_TABLE)
         cur = await db.execute("SELECT version FROM schema_version LIMIT 1")
         row = await cur.fetchone()
         await cur.close()
+        current = int(row[0]) if row is not None else 0
+        await _migrate(db, current)
+        # Always (re)create the current dedup index after any migration.
+        await db.execute(CREATE_WATCHER_EVENTS_DEDUP_INDEX)
         if row is None:
             await db.execute(
                 "INSERT INTO schema_version (version) VALUES (?)",
                 (_WATCHERS_SCHEMA_VERSION,),
             )
+        elif current != _WATCHERS_SCHEMA_VERSION:
+            await db.execute(
+                "UPDATE schema_version SET version = ?", (_WATCHERS_SCHEMA_VERSION,)
+            )
         await db.commit()
+
+
+async def _migrate(db: aiosqlite.Connection, from_version: int) -> None:
+    """Apply forward migrations in place. Safe to call repeatedly.
+
+    A fresh DB (``from_version`` 0) needs nothing beyond the CREATE statements
+    in ``init_watchers_db``. An existing v1 DB must:
+      * gain the ``watcher_high_water`` table (created unconditionally above), and
+      * replace the old 3-column dedup index with the 4-column one that includes
+        ``source_name`` (the new index is (re)created by the caller).
+
+    The old global high-water columns (``last_eval_raw_id`` / ``last_eval_norm_id``)
+    are intentionally NOT seeded into the per-source table — the global marks are
+    wrong, so each watcher re-evaluates from scratch once (a bounded one-time
+    backfill, capped by ``watcher_max_events``).
+    """
+    if from_version < 2:
+        # Drop the legacy source-less dedup index; the caller recreates the
+        # 4-column version. No-op if it was never created.
+        await db.execute("DROP INDEX IF EXISTS idx_watcher_events_dedup")
 
 
 def _row_to_watcher(row: sqlite3.Row | aiosqlite.Row) -> dict[str, Any]:  # type: ignore[name-defined]
@@ -350,6 +399,7 @@ async def delete_watcher(watcher_id: str) -> bool:
     async with aiosqlite.connect(_WATCHERS_DB_PATH) as db:
         cur = await db.execute("DELETE FROM watchers WHERE id = ?", (watcher_id,))
         await db.execute("DELETE FROM watcher_events WHERE watcher_id = ?", (watcher_id,))
+        await db.execute("DELETE FROM watcher_high_water WHERE watcher_id = ?", (watcher_id,))
         await db.commit()
         removed = cur.rowcount > 0
     if removed:
@@ -456,13 +506,54 @@ async def record_triggers(
     return inserted
 
 
+async def get_high_water_map(watcher_id: str, dataset: str) -> dict[str, int]:
+    """Return ``{source_name: last_id}`` per-source high-water marks for a
+    watcher+dataset. Missing sources default to 0 at the call site."""
+    await init_watchers_db()
+    async with aiosqlite.connect(_WATCHERS_DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT source_name, last_id FROM watcher_high_water "
+            "WHERE watcher_id = ? AND dataset = ?",
+            (watcher_id, dataset),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+    return {str(r[0]): int(r[1]) for r in rows}
+
+
+async def update_high_water_map(
+    watcher_id: str, dataset: str, marks: dict[str, int]
+) -> None:
+    """Advance per-source high-water marks (never decreases). ``marks`` maps
+    ``source_name -> max_id`` observed this pass."""
+    if not marks:
+        return
+    await init_watchers_db()
+    async with aiosqlite.connect(_WATCHERS_DB_PATH) as db:
+        for source_name, last_id in marks.items():
+            await db.execute(
+                """
+                INSERT INTO watcher_high_water (watcher_id, dataset, source_name, last_id)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(watcher_id, dataset, source_name)
+                DO UPDATE SET last_id = MAX(last_id, excluded.last_id)
+                """,
+                (watcher_id, dataset, str(source_name), int(last_id)),
+            )
+        await db.commit()
+
+
 async def update_high_water(
     watcher_id: str,
     *,
     raw_id: int | None = None,
     norm_id: int | None = None,
 ) -> None:
-    """Advance a watcher's per-dataset high-water marks (never decreases)."""
+    """Advance a watcher's legacy global high-water columns (never decreases).
+
+    Retained for backward compatibility; the engine now uses the per-source
+    ``watcher_high_water`` table instead (see ``update_high_water_map``).
+    """
     await init_watchers_db()
     sets: list[str] = []
     params: list[Any] = []
