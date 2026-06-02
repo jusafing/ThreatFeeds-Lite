@@ -5,7 +5,7 @@
 # Executes the T1-T9 API-client test plan against a running server, driving
 # scripts/api_client.py. Every run creates a fresh results directory
 # test-client-<epoch>/ containing:
-#   - T1..T9 markdown files (one per test: command + captured response)
+#   - T1..T11 markdown files (one per test: command + captured response)
 #   - script-run.log   the exact api_client.py invocation per test (password masked)
 #   - execution.log    timestamps, per-test status/exit code, and any errors
 #
@@ -233,8 +233,19 @@ run_test 9 query-actor-indicators "NL query: high-severity indicators by actor" 
   "Natural-language query for high-severity indicators attributed to a threat actor. Requires an LLM provider (else HTTP 503)." \
   -- query "high severity indicators attributed to the Lazarus group" --type normalized --max 25
 
+# ── T10-T11: exact-column field search (raw + normalized) ────────────────────
+# These need no LLM — they exercise the deterministic ?field=name=value filter
+# added in issue_local_02, querying directly from the raw and normalized stores.
+run_test 10 field-raw-severity "Field search from raw: severity=critical" read \
+  "Fetch raw rows filtered by an exact column value (severity=critical) using the repeatable --field flag. Unknown columns are ignored server-side." \
+  -- get-raw --field severity=critical --max 25
+
+run_test 11 field-normalized-indicator-type "Field search from normalized: indicator_type=ipv4" read \
+  "Fetch normalized rows filtered by an exact column value (indicator_type=ipv4) from the normalized store. Validated against the normalized schema." \
+  -- get-normalized --field indicator_type=ipv4 --max 25
+
 exec_log "run finished: results in ${OUT_DIR}"
 echo "Done. Results: ${OUT_DIR}"
-echo "  - markdown:      T1..T9-*.md"
+echo "  - markdown:      T1..T11-*.md"
 echo "  - command log:   script-run.log"
 echo "  - execution log: execution.log"
