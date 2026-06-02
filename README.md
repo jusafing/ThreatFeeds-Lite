@@ -61,6 +61,11 @@ Open your browser at **http://localhost:8000**
 > By default the server binds to localhost only. To expose it on your network
 > or use a different port, see [Binding & ports](#binding--ports) below.
 
+> **Sharing the server?** Authentication is **off by default** (open UI and API).
+> For anything beyond a local single-user run — especially when binding to a
+> network interface — start with `./threatfeeds-lite start --enable-auth` and see
+> [Authentication](#authentication-optional) for roles and first-run admin setup.
+
 ---
 
 ## Development Mode
@@ -267,7 +272,17 @@ scripts/api_client.py get-raw feedA feedB
 
 # Cap the number of events returned
 scripts/api_client.py get-raw --max 50
+
+# Exact-column filter: only critical-severity rows (repeatable, AND-combined)
+scripts/api_client.py get-raw --field severity=critical
+scripts/api_client.py get-raw --field severity=critical --field indicator_type=url
 ```
+
+> `--field NAME=VALUE` is a **deterministic exact-match** filter (no LLM). The
+> column name is validated server-side against the table's real columns;
+> unknown or unsafe names are silently dropped rather than reaching SQL, so the
+> flag cannot inject arbitrary queries. Use `query` (below) for fuzzy,
+> natural-language matching instead.
 
 ### `get-normalized` — normalized events
 
@@ -279,7 +294,17 @@ scripts/api_client.py get-normalized
 
 # A single feed, capped at 20 events
 scripts/api_client.py get-normalized feedA --max 20
+
+# Exact-column filter, validated against the normalized schema
+scripts/api_client.py get-normalized --field indicator_type=ipv4
 ```
+
+> **Raw vs normalized are independent stores.** `get-raw` (and
+> `search`/`query --type raw`) read the as-ingested **raw** events; `get-normalized`
+> (and the `--type normalized` variants) read the **normalized** table produced by
+> the normalizer. The same `--field`/`search`/`query` filter run against each can
+> return different rows — raw reflects original feed fields, normalized reflects
+> the mapped/canonical schema.
 
 > With no feed names, both `get-*` commands issue a single all-feeds request.
 > With feed names, they request each feed in turn and merge the results,
@@ -354,7 +379,7 @@ scripts/api_client.py list-feeds --type normalized
 ### Demo runner — run the whole test plan with one command
 
 `scripts/client_tests_demo/run_tests.sh` drives `api_client.py` through the full
-T1–T9 test plan against a running server and saves every result to disk. It is
+T1–T11 test plan against a running server and saves every result to disk. It is
 the easiest way to see the client in action end to end.
 
 **1. Configure connection + credentials.** Copy the example env file and fill it
@@ -365,7 +390,7 @@ cp scripts/client_tests_demo/.env.example scripts/client_tests_demo/.env.test
 # then edit .env.test:
 #   host / port            — the server to test
 #   user_push / pass_push  — account used to push events (T1; a sender or admin)
-#   user_read / pass_read  — account used for reads/search/queries (T2–T9; normal or admin)
+#   user_read / pass_read  — account used for reads/search/queries (T2–T11; normal or admin)
 ```
 
 **2. Run it.**
@@ -378,13 +403,15 @@ bash scripts/client_tests_demo/run_tests.sh --env /path/to/other.env
 **3. Read the results.** Each run creates a fresh `test-client-<epoch>/`
 directory inside `scripts/client_tests_demo/` containing:
 
-- `T1..T9-*.md` — one markdown file per test (the command run + the captured response),
+- `T1..T11-*.md` — one markdown file per test (the command run + the captured response),
 - `script-run.log` — the exact `api_client.py` invocation for each test (password masked),
 - `execution.log` — timestamps, per-test status, and any errors.
 
 These result directories are **gitignored** — they are for local verification
 only and are never committed. The natural-language tests (T7–T9) require an LLM
-provider configured on the server; without one they record an HTTP `503`.
+provider configured on the server; without one they record an HTTP `503`. The
+field-search tests (T10–T11) are deterministic `--field` filters that need no
+LLM.
 
 ### Authentication
 
