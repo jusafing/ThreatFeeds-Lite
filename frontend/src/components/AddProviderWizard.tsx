@@ -49,6 +49,7 @@ import {
 
 import {
   api,
+  synthesizeErrorTestResult,
   type LLMDiscoverResult,
   type LLMProviderConfig,
   type LLMProviderKind,
@@ -402,6 +403,26 @@ export default function AddProviderWizard({ existingNames, onClose, onAdded }: P
   const truncate = (s: string) =>
     s.length > _INLINE_ERR_LIMIT ? s.slice(0, _INLINE_ERR_LIMIT) + '…' : s
 
+  // issue_local_02: the result backing "View test details". Prefer the richest
+  // available payload (probe > discover transcript), but fall back to a
+  // synthesised single-step result built from a thrown error string so the
+  // link + modal also open when Test/Connect threw before any structured
+  // transcript came back (network/4xx/5xx).
+  const detailsResult = useMemo<LLMTestRunResult | null>(() => {
+    if (probeResult) return probeResult
+    if (probeError) return synthesizeErrorTestResult(probeError, 'complete')
+    if (discoverResult) {
+      return {
+        status: discoverResult.status,
+        details: discoverResult.details,
+        models: discoverResult.models,
+        sample: null,
+      }
+    }
+    if (discoverError) return synthesizeErrorTestResult(discoverError, 'list_models')
+    return null
+  }, [probeResult, probeError, discoverResult, discoverError])
+
   // ── Render ──────────────────────────────────────────────────────────────
 
   return (
@@ -591,7 +612,7 @@ export default function AddProviderWizard({ existingNames, onClose, onAdded }: P
               </span>
             )}
 
-            {(discoverResult || probeResult) && (
+            {detailsResult && (
               <button
                 type="button"
                 className="text-blue-400 hover:underline flex items-center gap-1 ml-1 text-xs"
@@ -729,20 +750,9 @@ export default function AddProviderWizard({ existingNames, onClose, onAdded }: P
         </div>
       </div>
 
-      {showDetails && (discoverResult || probeResult) && (
+      {showDetails && detailsResult && (
         <TestDetailsModal
-          /* Prefer the probe result if available (richer transcript);
-             otherwise show the discover result. The modal accepts the
-             canonical LLMTestRunResult shape, so we synthesise a
-             sample=null payload for the discover-only case. */
-          result={
-            probeResult ?? {
-              status: discoverResult!.status,
-              details: discoverResult!.details,
-              models: discoverResult!.models,
-              sample: null,
-            }
-          }
+          result={detailsResult}
           providerLabel={name.trim() || '(unnamed draft)'}
           onClose={() => setShowDetails(false)}
         />

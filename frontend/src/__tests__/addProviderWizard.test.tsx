@@ -485,6 +485,20 @@ describe('AddProviderWizard (027)', () => {
     expect(screen.getByText(/#1 list_models/)).toBeInTheDocument()
   })
 
+  it('View test details opens after a thrown Connect error (issue_local_02)', async () => {
+    vi.mocked(api.llm.discoverDraft).mockRejectedValue(new Error('connect kaboom'))
+    render(<AddProviderWizard existingNames={[]} onClose={() => {}} onAdded={() => {}} />)
+    await connectToProvider()
+    // Link renders from the synthesised error result even though no
+    // structured transcript came back.
+    await waitFor(() =>
+      expect(screen.getByText(/View test details/i)).toBeInTheDocument(),
+    )
+    fireEvent.click(screen.getByText(/View test details/i))
+    expect(screen.getByText(/Test details — my-openai/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/connect kaboom/i).length).toBeGreaterThan(0)
+  })
+
   it('shows openai_compatible base_url hint only for that kind', () => {
     render(<AddProviderWizard existingNames={[]} onClose={() => {}} onAdded={() => {}} />)
     expect(screen.queryByText(/vLLM, LM Studio/i)).not.toBeInTheDocument()

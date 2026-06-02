@@ -1105,6 +1105,38 @@ export interface LLMDiscoverResult {
 }
 
 /**
+ * issue_local_02: build a minimal LLMTestRunResult from a thrown error string
+ * (network/4xx/5xx that never produced a structured payload) so the
+ * "View test details" link + TestDetailsModal can open on error-only paths,
+ * not just when the server returned a transcript. A single synthetic step
+ * carries the error message.
+ */
+export function synthesizeErrorTestResult(
+  error: string,
+  step = 'test',
+): LLMTestRunResult {
+  return {
+    status: 'error',
+    details: [
+      {
+        step,
+        method: null,
+        url: null,
+        headers_redacted: null,
+        request_body: null,
+        status_code: null,
+        response_body: null,
+        duration_ms: 0,
+        error,
+        warning: null,
+      },
+    ],
+    models: null,
+    sample: null,
+  }
+}
+
+/**
  * Legacy Test Connection shape kept ONLY so existing call sites in
  * LLMProvidersTab + its tests keep compiling until Steps 6+7 swap them
  * over to :type:`LLMTestRunResult`. Do NOT use in new code.
