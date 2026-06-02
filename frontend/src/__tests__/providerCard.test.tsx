@@ -204,6 +204,23 @@ describe('ProviderCard (027 step 5: Discover-then-Probe per-card surface)', () =
     expect(savesAfterEdit[1]).not.toBeDisabled()
   })
 
+  it('"View test details" opens after a thrown Test connection error (issue_local_02)', async () => {
+    vi.mocked(api.llm.getConfig).mockResolvedValue(makeConfig())
+    vi.mocked(api.llm.testProviderDraft).mockRejectedValue(new Error('probe kaboom'))
+    renderTab()
+    await screen.findByRole('heading', { name: 'p1' })
+    await expandP1()
+
+    fireEvent.click(screen.getByRole('button', { name: /Test connection/i }))
+    // The link renders from the synthesised error result even though the
+    // call threw before returning a structured transcript.
+    const link = await screen.findByText(/View test details/i)
+    fireEvent.click(link)
+    // Modal heading + the synthesised error step both render.
+    expect(await screen.findByText(/Test details — p1/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/probe kaboom/i).length).toBeGreaterThan(0)
+  })
+
   it('Save with UNCHANGED base_url persists WITHOUT a connection test or discovery (prompts-036)', async () => {
     vi.mocked(api.llm.getConfig).mockResolvedValue(makeConfig())
     vi.mocked(api.llm.updateProvider).mockResolvedValue({

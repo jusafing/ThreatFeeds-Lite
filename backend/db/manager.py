@@ -34,6 +34,31 @@ _SYSTEM_DB_STEMS: set[str] = {"normalized", "meta", "proposals", "users"}
 
 InsertResult = Literal["inserted", "duplicate", "error"]
 
+# Known core columns of the per-source ``entries`` table. Used both to split a
+# pushed entry into typed columns vs the ``extra`` JSON blob AND, in
+# query_entries, as the strict whitelist for arbitrary ``field`` filters — the
+# filter column name is interpolated into SQL, so anything not in this set MUST
+# be rejected to prevent SQL-identifier injection. ``id``/``dedup_key`` are
+# real columns too and safe to filter on.
+CORE_COLUMNS: frozenset[str] = frozenset({
+    "indicator", "indicator_type", "threat_type", "severity", "confidence",
+    "source", "source_url", "title", "description", "tags", "tlp",
+    "published_at", "first_seen", "last_seen", "ingested_at",
+    "cve_id", "cvss_score", "cvss_vector", "affected_product", "affected_vendor",
+    "patch_available", "mitre_attack_id", "malware_family", "campaign", "actor",
+    "country", "autonomous_system", "port", "protocol", "geo_lat", "geo_lon",
+    "ingest_mode", "raw",
+})
+
+# Columns that are valid filter targets but are NOT packed from a pushed entry
+# (system-managed). Kept separate from CORE_COLUMNS so add_entry's split logic
+# is unchanged while query_entries can still filter on them.
+_FILTERABLE_EXTRA_COLUMNS: frozenset[str] = frozenset({"id", "dedup_key"})
+
+# Full whitelist of columns an arbitrary ``field`` filter may target.
+FILTERABLE_COLUMNS: frozenset[str] = CORE_COLUMNS | _FILTERABLE_EXTRA_COLUMNS
+
+
 
 def _db_path(source_name: str) -> Path:
     DATA_DIR.mkdir(exist_ok=True)
@@ -152,18 +177,7 @@ async def insert_entry(source_name: str, entry: dict[str, Any]) -> InsertResult:
     """
     await init_db(source_name)
 
-    # Known core columns
-    core_columns = {
-        "indicator", "indicator_type", "threat_type", "severity", "confidence",
-        "source", "source_url", "title", "description", "tags", "tlp",
-        "published_at", "first_seen", "last_seen", "ingested_at",
-        "cve_id", "cvss_score", "cvss_vector", "affected_product", "affected_vendor",
-        "patch_available", "mitre_attack_id", "malware_family", "campaign", "actor",
-        "country", "autonomous_system", "port", "protocol", "geo_lat", "geo_lon",
-        "ingest_mode", "raw",
-    }
-
-    row: dict[str, Any] = {k: v for k, v in entry.items() if k in core_columns}
+    row: dict[str, Any] = {k: v for k, v in entry.items() if k in CORE_COLUMNS}
     row["source"] = source_name
     row["ingested_at"] = row.get("ingested_at") or datetime.now(timezone.utc).isoformat()
 
@@ -177,7 +191,7 @@ async def insert_entry(source_name: str, entry: dict[str, Any]) -> InsertResult:
             row[key] = json.dumps(value, ensure_ascii=False, default=str)
 
     # Pack unknown keys into extra JSON blob
-    extra = {k: v for k, v in entry.items() if k not in core_columns and k != "extra"}
+    extra = {k: v for k, v in entry.items() if k not in CORE_COLUMNS and k != "extra"}
     row["extra"] = json.dumps(extra)
 
     # Dedup hash is computed over the FULL entry (core + extras), not just the
@@ -238,6 +252,12 @@ async def query_entries(
 
                 if filters:
                     for col, val in filters.items():
+                        # SECURITY: ``col`` is interpolated into the SQL text,
+                        # so only known table columns may be filtered. Unknown
+                        # keys (e.g. extra-JSON fields, or an injection attempt)
+                        # are silently dropped rather than executed.
+                        if col not in FILTERABLE_COLUMNS:
+                            continue
                         where_clauses.append(f"{col} = ?")
                         params.append(val)
                 if search:

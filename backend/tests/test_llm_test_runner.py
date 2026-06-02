@@ -192,6 +192,57 @@ def test_complete_failure_marks_overall_error_with_models_still_returned():
     assert "timeout" in (complete_step["error"] or "")
 
 
+def _empty_content_body(finish_reason: str = "length") -> bytes:
+    """OpenAI-shaped HTTP 200 with empty content — the reasoning-model /
+    proxy failure mode issue_local_02's probe must soft-pass."""
+    return json.dumps({
+        "choices": [{"message": {"content": ""}, "finish_reason": finish_reason}],
+    }).encode()
+
+
+def test_complete_empty_content_soft_passes_as_warning_not_error():
+    """issue_local_02: a reachable+authenticated provider that answers HTTP 200
+    with empty content (finish_reason=length) must NOT fail the connectivity
+    test. The aggregate stays 'ok' and the complete step carries a non-blocking
+    warning instead of an error."""
+    tx = _Tx([
+        (200, {}, _models_body("gpt-4o-mini")),
+        (200, {}, _empty_content_body("length")),
+    ])
+    c = OpenAIClient(
+        name="o", base_url="https://api.openai.com/v1",
+        api_key="sk", model="gpt-4o-mini", transport=tx,
+    )
+    result = run_provider_test(c)
+    assert result["status"] == "ok"
+    assert result["models"] == ["gpt-4o-mini"]
+    complete_step = result["details"][-1]
+    assert complete_step["step"] == "complete"
+    assert complete_step["error"] is None
+    assert complete_step["warning"] is not None
+    assert "finish_reason=length" in complete_step["warning"]
+
+
+def test_complete_genuine_provider_error_still_marks_overall_error():
+    """The soft-pass is narrow: a real HTTP error (not empty-content) on the
+    complete step still fails the aggregate."""
+    err = LLMProviderError("500 boom", status=500, body="server error")
+    tx = _Tx([
+        (200, {}, _models_body("gpt-4o-mini")),
+        err,
+    ])
+    c = OpenAIClient(
+        name="o", base_url="https://api.openai.com/v1",
+        api_key="sk", model="gpt-4o-mini", transport=tx,
+    )
+    result = run_provider_test(c)
+    assert result["status"] == "error"
+    complete_step = result["details"][-1]
+    assert complete_step["step"] == "complete"
+    assert "500 boom" in (complete_step["error"] or "")
+    assert complete_step.get("warning") is None
+
+
 def test_openai_compatible_list_models_none_is_nonblocking_for_full_test():
     """prompts-061: when every catalog candidate fails (list_models swallows
     the errors and returns None) the FULL provider test no longer fails on that

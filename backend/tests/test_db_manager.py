@@ -315,3 +315,41 @@ def test_reset_db_single_source_unaffected(temp_data_dir):
 
     assert deleted == ["feed_a.db"]
     assert (temp_data_dir / "users.db").exists()
+
+
+@pytest.mark.asyncio
+async def test_query_entries_field_filter_matches_exact_column(temp_data_dir):
+    """issue_local_02: an arbitrary validated column filter returns only the
+    matching rows."""
+    from backend.db.manager import insert_entry, query_entries
+
+    await insert_entry("ff_src", {
+        "indicator": "1.1.1.1", "severity": "critical", "source": "ff_src",
+    })
+    await insert_entry("ff_src", {
+        "indicator": "2.2.2.2", "severity": "low", "source": "ff_src",
+    })
+
+    crit = await query_entries(source_name="ff_src", filters={"severity": "critical"})
+    assert [r["indicator"] for r in crit] == ["1.1.1.1"]
+
+
+@pytest.mark.asyncio
+async def test_query_entries_unknown_field_filter_is_ignored(temp_data_dir):
+    """A non-whitelisted column (extra-JSON field or injection attempt) must be
+    silently dropped, never interpolated into SQL — the query still succeeds and
+    returns all rows."""
+    from backend.db.manager import insert_entry, query_entries
+
+    await insert_entry("ff_src2", {
+        "indicator": "3.3.3.3", "severity": "high", "source": "ff_src2",
+    })
+
+    # Bogus column name with SQL metacharacters — must not raise and must not
+    # filter anything out.
+    rows = await query_entries(
+        source_name="ff_src2",
+        filters={"severity = 'x' OR 1=1; --": "boom", "not_a_column": "v"},
+    )
+    assert len(rows) == 1
+    assert rows[0]["indicator"] == "3.3.3.3"

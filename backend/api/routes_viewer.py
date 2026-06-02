@@ -21,6 +21,13 @@ async def get_entries(
     indicator_type: Optional[str] = Query(None),
     threat_type: Optional[str] = Query(None),
     ingest_mode: Optional[str] = Query(None),
+    field: Optional[list[str]] = Query(
+        None,
+        description=(
+            "Arbitrary column filter as 'name=value' (repeatable). Unknown "
+            "columns are ignored. Validated against the entries table columns."
+        ),
+    ),
     limit: int = Query(500, ge=1, le=2000),
     offset: int = Query(0, ge=0),
 ) -> list[dict]:
@@ -33,6 +40,14 @@ async def get_entries(
         filters["threat_type"] = threat_type
     if ingest_mode:
         filters["ingest_mode"] = ingest_mode
+
+    # issue_local_02: arbitrary 'field=name=value' filters. The column name is
+    # validated against the entries-table whitelist inside query_entries, so an
+    # unknown/unsafe name is silently dropped rather than reaching SQL.
+    for item in field or []:
+        name, sep, value = item.partition("=")
+        if sep and name:
+            filters[name.strip()] = value
 
     return await query_entries(
         source_name=source,

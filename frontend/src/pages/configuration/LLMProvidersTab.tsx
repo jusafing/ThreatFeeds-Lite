@@ -65,6 +65,7 @@ import {
   LLMProviderConfig,
   LLMProviderKind,
   LLMTestRunResult,
+  synthesizeErrorTestResult,
 } from '../../api/client'
 import Toggle from '../../components/Toggle'
 import AddProviderWizard from '../../components/AddProviderWizard'
@@ -449,6 +450,17 @@ function ProviderCard({
     return null
   }, [probeError, probeResult])
 
+  // issue_local_02: backing result for "View test details". Prefer the probe
+  // transcript; otherwise synthesise a single-step result from a thrown
+  // Test/Discover error string so the link + modal still open when the call
+  // failed before any structured payload arrived.
+  const detailsResult = useMemo<LLMTestRunResult | null>(() => {
+    if (probeResult) return probeResult
+    if (probeError) return synthesizeErrorTestResult(probeError, 'complete')
+    if (discoverError) return synthesizeErrorTestResult(discoverError, 'list_models')
+    return null
+  }, [probeResult, probeError, discoverError])
+
   return (
     <>
       <div className="card space-y-3" data-testid={`provider-card-${initial.name}`}>
@@ -558,7 +570,7 @@ function ProviderCard({
             </span>
           )}
 
-          {probeResult && (
+          {detailsResult && (
             <button
               type="button"
               className="text-blue-400 hover:underline flex items-center gap-1 ml-1 text-xs"
@@ -646,9 +658,9 @@ function ProviderCard({
         )}
       </div>
 
-      {showDetails && probeResult && (
+      {showDetails && detailsResult && (
         <TestDetailsModal
-          result={probeResult}
+          result={detailsResult}
           providerLabel={initial.name}
           onClose={() => setShowDetails(false)}
         />

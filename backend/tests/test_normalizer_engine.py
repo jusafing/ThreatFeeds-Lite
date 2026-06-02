@@ -540,3 +540,38 @@ async def test_run_normalizer_disabled_records_no_history(monkeypatch):
 
     assert result["status"] == "disabled"
     assert await list_runs() == []
+
+
+# ── issue_local_02: normalized field filters ──────────────────────────────────
+
+@pytest.mark.anyio
+async def test_query_normalized_field_filter_matches_validated_column(
+    tmp_path, monkeypatch,
+):
+    """An arbitrary filter on a yaml-derived column returns only matching rows;
+    an unknown/unsafe column name is silently dropped (never interpolated into
+    SQL)."""
+    import backend.normalizer.db as ndb
+
+    monkeypatch.setattr(ndb, "_NORM_DB_PATH", tmp_path / "normalized.db")
+
+    await ndb.insert_normalized({
+        "source_entry_id": 1, "source_name": "feed-q",
+        "indicator": "1.1.1.1", "severity": "critical",
+    })
+    await ndb.insert_normalized({
+        "source_entry_id": 2, "source_name": "feed-q",
+        "indicator": "2.2.2.2", "severity": "low",
+    })
+
+    crit = await ndb.query_normalized(
+        source_name="feed-q", filters={"severity": "critical"},
+    )
+    assert [r["indicator"] for r in crit] == ["1.1.1.1"]
+
+    # Unknown column + injection attempt are dropped → all rows returned.
+    everything = await ndb.query_normalized(
+        source_name="feed-q",
+        filters={"not_a_column": "x", "severity = 'x'; DROP TABLE": "y"},
+    )
+    assert len(everything) == 2

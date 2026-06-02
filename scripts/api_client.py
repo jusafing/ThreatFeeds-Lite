@@ -44,6 +44,10 @@ Examples:
   # Search the raw table, and list available feeds
   scripts/api_client.py search "npm" --type raw --max 20
   scripts/api_client.py list-feeds
+
+  # Filter raw or normalized rows by exact column value (repeatable --field)
+  scripts/api_client.py get-raw --field severity=critical --field indicator_type=ipv4
+  scripts/api_client.py get-normalized --field cve_id=CVE-2026-0001
 """
 from __future__ import annotations
 
@@ -60,6 +64,14 @@ DEFAULT_URL = "http://127.0.0.1:8000"
 DEFAULT_MAX = 1000
 _TIMEOUT = 30
 
+# Shared help for the repeatable column-filter flag. The server validates each
+# NAME against the table schema and silently ignores unknown columns.
+_FIELD_HELP = (
+    "Filter by an exact column value as NAME=VALUE (repeatable, e.g. "
+    "--field severity=critical --field indicator_type=ipv4). Unknown columns "
+    "are ignored by the server."
+)
+
 
 def build_opener() -> urllib.request.OpenerDirector:
     """Return an opener with an in-memory cookie jar (carries the session)."""
@@ -68,12 +80,20 @@ def build_opener() -> urllib.request.OpenerDirector:
 
 
 def build_url(base: str, path: str, params: dict[str, object] | None = None) -> str:
-    """Join a base URL, an API path, and optional query parameters."""
+    """Join a base URL, an API path, and optional query parameters.
+
+    A list value is serialised as a repeated key (``?field=a=b&field=c=d``) via
+    ``doseq=True`` — used by the ``--field`` column filters. ``None`` values and
+    empty lists are dropped.
+    """
     url = base.rstrip("/") + path
     if params:
-        query = {k: v for k, v in params.items() if v is not None}
+        query = {
+            k: v for k, v in params.items()
+            if v is not None and v != []
+        }
         if query:
-            url += "?" + urllib.parse.urlencode(query)
+            url += "?" + urllib.parse.urlencode(query, doseq=True)
     return url
 
 
@@ -105,6 +125,7 @@ def login(opener: urllib.request.OpenerDirector, base: str, username: str, passw
 def fetch_events(
     opener: urllib.request.OpenerDirector, base: str, path: str,
     feeds: list[str], max_events: int, search: str | None = None,
+    fields: list[str] | None = None,
 ) -> list[object]:
     """
     Fetch events from a read endpoint.
@@ -113,10 +134,15 @@ def fetch_events(
     list of feeds, issues one request per feed (?source=<feed>) and merges the
     results. The combined output is truncated to ``max_events``. An optional
     ``search`` term is forwarded as the ``?search=`` full-text query parameter.
+    Optional ``fields`` ('name=value' strings) are forwarded as repeated
+    ``?field=`` column filters (validated server-side against the table schema).
     """
     results: list[object] = []
     if not feeds:
-        url = build_url(base, path, {"limit": max_events, "search": search})
+        url = build_url(
+            base, path,
+            {"limit": max_events, "search": search, "field": fields},
+        )
         results = list(http_get_json(opener, url))
     else:
         for feed in feeds:
@@ -124,7 +150,9 @@ def fetch_events(
             if remaining <= 0:
                 break
             url = build_url(
-                base, path, {"source": feed, "limit": remaining, "search": search},
+                base, path,
+                {"source": feed, "limit": remaining, "search": search,
+                 "field": fields},
             )
             results.extend(http_get_json(opener, url))
     return results[:max_events]
@@ -169,7 +197,10 @@ def _maybe_login(opener: urllib.request.OpenerDirector, args: argparse.Namespace
 def cmd_get_raw(args: argparse.Namespace) -> int:
     opener = build_opener()
     _maybe_login(opener, args)
-    events = fetch_events(opener, args.url, "/api/viewer/entries", args.feeds, args.max)
+    events = fetch_events(
+        opener, args.url, "/api/viewer/entries", args.feeds, args.max,
+        fields=args.field,
+    )
     print(json.dumps(events))
     return 0
 
@@ -177,7 +208,10 @@ def cmd_get_raw(args: argparse.Namespace) -> int:
 def cmd_get_normalized(args: argparse.Namespace) -> int:
     opener = build_opener()
     _maybe_login(opener, args)
-    events = fetch_events(opener, args.url, "/api/normalizer/entries", args.feeds, args.max)
+    events = fetch_events(
+        opener, args.url, "/api/normalizer/entries", args.feeds, args.max,
+        fields=args.field,
+    )
     print(json.dumps(events))
     return 0
 
@@ -196,7 +230,10 @@ def cmd_search(args: argparse.Namespace) -> int:
     opener = build_opener()
     _maybe_login(opener, args)
     path = ENTRIES_PATHS[args.type]
-    events = fetch_events(opener, args.url, path, args.feeds, args.max, search=args.query)
+    events = fetch_events(
+        opener, args.url, path, args.feeds, args.max,
+        search=args.query, fields=args.field,
+    )
     print(json.dumps(events))
     return 0
 
@@ -240,6 +277,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  api_client.py --url http://host:8000 send --file events.json\n"
             "  cat events.json | api_client.py send\n"
             "  api_client.py search \"npm\" --type raw --max 20\n"
+            "  api_client.py get-raw --field severity=critical --field indicator_type=ipv4\n"
+            "  api_client.py get-normalized --field cve_id=CVE-2026-0001\n"
             "  api_client.py query \"critical CVEs from 2026 affecting nginx\"\n"
             "  api_client.py list-feeds\n"
         ),
@@ -264,6 +303,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--max", type=int, default=DEFAULT_MAX,
         help=f"Maximum number of events (default: {DEFAULT_MAX})",
     )
+    p_raw.add_argument(
+        "--field", action="append", metavar="NAME=VALUE", default=None,
+        help=_FIELD_HELP,
+    )
     p_raw.set_defaults(func=cmd_get_raw)
 
     p_norm = sub.add_parser("get-normalized", help="Get the normalized data table as a JSON string")
@@ -271,6 +314,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_norm.add_argument(
         "--max", type=int, default=DEFAULT_MAX,
         help=f"Maximum number of events (default: {DEFAULT_MAX})",
+    )
+    p_norm.add_argument(
+        "--field", action="append", metavar="NAME=VALUE", default=None,
+        help=_FIELD_HELP,
     )
     p_norm.set_defaults(func=cmd_get_normalized)
 
@@ -292,6 +339,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument(
         "--max", type=int, default=DEFAULT_MAX,
         help=f"Maximum number of results (default: {DEFAULT_MAX})",
+    )
+    p_search.add_argument(
+        "--field", action="append", metavar="NAME=VALUE", default=None,
+        help=_FIELD_HELP,
     )
     p_search.set_defaults(func=cmd_search)
 

@@ -217,6 +217,23 @@ def test_empty_content_finish_reason_length_raises_truncation_diagnostic():
     assert "llm_max_tokens" in msg
 
 
+def test_empty_content_raises_typed_empty_content_error_with_finish_reason():
+    """issue_local_02: the empty-content failure must be the narrower
+    LLMEmptyContentError (subclass of LLMProviderError) and carry the
+    server's finish_reason, so the connectivity probe can soft-pass it
+    while genuine provider errors still fail."""
+    from backend.llm.errors import LLMEmptyContentError, LLMProviderError
+
+    body = json.dumps({
+        "choices": [{"message": {"content": ""}, "finish_reason": "length"}],
+    }).encode()
+    tx = _FakeTransport([(200, {}, body)])
+    with pytest.raises(LLMEmptyContentError) as exc:
+        _compat_client(tx).complete("hi")
+    assert isinstance(exc.value, LLMProviderError)
+    assert exc.value.finish_reason == "length"
+
+
 def test_empty_content_with_reasoning_field_raises_reasoning_diagnostic():
     """prompts-035 (#2.5): empty content but a populated reasoning_content field
     → the model reasoned without producing a final answer."""
