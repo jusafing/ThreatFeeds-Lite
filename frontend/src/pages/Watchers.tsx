@@ -1,0 +1,1144 @@
+import { useState, useEffect, useMemo } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import {
+  api,
+  Watcher,
+  WatcherInput,
+  WatcherCondition,
+  WatcherDataset,
+  WatcherSeverity,
+  WatcherMode,
+  WatcherFormat,
+  WatcherMatchType,
+  WatcherPublishTarget,
+  WatcherWebhookFormat,
+  WatcherEvent,
+  DeliveryDetail,
+} from '../api/client'
+import Toggle from '../components/Toggle'
+import WatcherDeliveryErrorModal from '../components/WatcherDeliveryErrorModal'
+import { getAppBasePrefix } from '../utils/basePrefix'
+import { clsx } from 'clsx'
+import { Plus, Trash2, Pencil, ChevronDown, ChevronUp, Copy, X, RefreshCw, Zap, AlertTriangle } from 'lucide-react'
+
+type Tab = 'summary' | 'config' | 'activity'
+
+const SEVERITIES: WatcherSeverity[] = ['low', 'medium', 'high', 'critical']
+const DATASETS: WatcherDataset[] = ['all', 'raw', 'normalized']
+const MODES: WatcherMode[] = ['realtime', 'scheduled']
+const FORMATS: WatcherFormat[] = ['json', 'csv', 'xml']
+const MATCH_TYPES: WatcherMatchType[] = ['exact', 'wildcard', 'contains', 'regex', 'gte', 'lte']
+const PUBLISH_TARGETS: WatcherPublishTarget[] = ['local', 'webhook', 'http']
+const PUBLISH_TARGET_LABELS: Record<WatcherPublishTarget, string> = {
+  local: 'Local URL feed',
+  webhook: 'Webhook',
+  http: 'HTTP Endpoint',
+}
+const WEBHOOK_FORMATS: WatcherWebhookFormat[] = ['generic', 'discord', 'slack', 'teams']
+const WEBHOOK_FORMAT_LABELS: Record<WatcherWebhookFormat, string> = {
+  generic: 'Generic (ThreatFeeds envelope)',
+  discord: 'Discord',
+  slack: 'Slack / Mattermost',
+  teams: 'Microsoft Teams',
+}
+// Best-effort mapping of a webhook URL host to a chat format, mirroring the
+// backend backfill so the form can auto-select a sensible default.
+function detectWebhookFormat(url: string | null | undefined): WatcherWebhookFormat {
+  const host = (url ?? '').toLowerCase()
+  if (host.includes('discord.com') || host.includes('discordapp.com')) return 'discord'
+  if (host.includes('hooks.slack.com') || host.includes('mattermost')) return 'slack'
+  if (
+    host.includes('webhook.office.com') ||
+    host.includes('office.com') ||
+    host.includes('logic.azure.com')
+  )
+    return 'teams'
+  return 'generic'
+}
+const MATCH_TYPE_LABELS: Record<WatcherMatchType, string> = {
+  exact: 'exact',
+  wildcard: 'wildcard',
+  contains: 'contains',
+  regex: 'regex',
+  gte: '≥ (numeric)',
+  lte: '≤ (numeric)',
+}
+
+/** Build the Activity-tab "Publish" cell label for a watcher: the publish
+ *  target, plus the webhook format when publishing to a webhook. */
+function watcherPublishLabel(w: {
+  publish_target: WatcherPublishTarget
+  webhook_format?: WatcherWebhookFormat
+}): string {
+  const base = PUBLISH_TARGET_LABELS[w.publish_target]
+  if (w.publish_target === 'webhook') {
+    return `${base} · ${WEBHOOK_FORMAT_LABELS[w.webhook_format ?? 'generic']}`
+  }
+  return base
+}
+
+// Match types whose comparison honours the per-condition case-sensitive flag.
+const CASE_AWARE_MATCH_TYPES: ReadonlySet<WatcherMatchType> = new Set<WatcherMatchType>([
+  'exact',
+  'wildcard',
+  'contains',
+])
+
+const MAX_FEED_MIN = 1
+const MAX_FEED_MAX = 100_000
+const INTERVAL_MIN = 10
+const CLEANUP_INTERVAL_MIN = 10
+const CLEANUP_INTERVAL_MAX = 86_400
+
+function feedUrl(id: string): string {
+  const prefix = getAppBasePrefix()
+  const path = `${prefix}/feed/watcher/${id}/`
+  return `${window.location.origin}${path}`
+}
+
+/** Copy text to clipboard, falling back to a hidden textarea + execCommand when
+ *  the async Clipboard API is unavailable (insecure context / older browsers).
+ *  Returns whether the copy is believed to have succeeded. */
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    /* fall through to legacy path */
+  }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.focus()
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    return ok
+  } catch {
+    return false
+  }
+}
+
+function formatTimestamp(ts: string | null | undefined): string {
+  if (!ts) return 'never'
+  const d = new Date(ts)
+  return Number.isNaN(d.getTime()) ? ts : d.toLocaleString()
+}
+
+export default function Watchers() {
+  const [activeTab, setActiveTab] = useState<Tab>('summary')
+
+  const TABS: { id: Tab; label: string }[] = [
+    { id: 'summary', label: 'Summary' },
+    { id: 'config', label: 'Configuration' },
+    { id: 'activity', label: 'Activity' },
+  ]
+
+  return (
+    <div className="p-6 space-y-6">
+      <div>
+        <h1 className="text-lg font-semibold text-gray-100">Watchers</h1>
+        <p className="text-sm text-gray-500">
+          Saved filters that publish matching events to a public feed URL.
+        </p>
+      </div>
+
+      <div className="border-b border-gray-800">
+        <nav className="flex gap-6 flex-wrap">
+          {TABS.map(({ id, label }) => (
+            <button
+              key={id}
+              onClick={() => setActiveTab(id)}
+              className={clsx(
+                'pb-3 text-sm font-medium transition-colors',
+                activeTab === id ? 'tab-active' : 'tab-inactive',
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      <div>
+        {activeTab === 'summary' && <SummaryTab />}
+        {activeTab === 'config' && <ConfigTab />}
+        {activeTab === 'activity' && <ActivityTab />}
+      </div>
+    </div>
+  )
+}
+
+// ── Shared query ─────────────────────────────────────────────────────────────
+
+function useWatchers() {
+  return useQuery({ queryKey: ['watchers'], queryFn: api.watchers.list })
+}
+
+function FeedLink({ id }: { id: string }) {
+  const [copied, setCopied] = useState(false)
+  const url = feedUrl(id)
+  return (
+    <div className="flex items-center gap-1.5">
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="text-xs text-blue-400 hover:underline font-mono truncate max-w-md"
+      >
+        {url}
+      </a>
+      <button
+        title="Copy feed URL"
+        className="text-gray-500 hover:text-gray-300"
+        onClick={async () => {
+          const ok = await copyToClipboard(url)
+          if (ok) {
+            setCopied(true)
+            setTimeout(() => setCopied(false), 1500)
+          }
+        }}
+      >
+        <Copy className="w-3.5 h-3.5" />
+      </button>
+      {copied && <span className="text-xs text-green-400">copied</span>}
+    </div>
+  )
+}
+
+// ── Summary tab ──────────────────────────────────────────────────────────────
+
+function SummaryTab() {
+  const qc = useQueryClient()
+  const { data: watchers, isLoading, isFetching } = useWatchers()
+  const [triggerMsg, setTriggerMsg] = useState<string | null>(null)
+  const [detailView, setDetailView] = useState<{ title: string; detail: DeliveryDetail } | null>(
+    null,
+  )
+
+  const toggle = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      api.watchers.setEnabled(id, enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['watchers'] }),
+  })
+
+  const trigger = useMutation({
+    mutationFn: (id: string) => api.watchers.trigger(id),
+    onSuccess: (res, id) => {
+      const w = watchers?.find((x) => x.id === id)
+      const name = w?.name ?? id
+      const deliveryNote =
+        res.delivery.delivered || res.delivery.failed
+          ? ` · delivered ${res.delivery.delivered}, failed ${res.delivery.failed}`
+          : ''
+      setTriggerMsg(
+        `"${name}": evaluated ${res.evaluated}, ${res.triggered} new event(s)${deliveryNote}.`,
+      )
+      qc.invalidateQueries({ queryKey: ['watchers'] })
+      qc.invalidateQueries({ queryKey: ['watcher-events'] })
+    },
+    onError: (err: unknown) =>
+      setTriggerMsg(err instanceof Error ? err.message : String(err)),
+  })
+
+  if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
+  if (!watchers || watchers.length === 0)
+    return <p className="text-sm text-gray-500">No watchers yet. Create one in the Configuration tab.</p>
+
+  const withErrors = watchers.filter((w) => w.delivery_error_count > 0)
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <button
+          className="btn-secondary text-xs inline-flex items-center gap-1.5"
+          disabled={isFetching}
+          onClick={() => qc.invalidateQueries({ queryKey: ['watchers'] })}
+        >
+          <RefreshCw className={clsx('w-3.5 h-3.5', isFetching && 'animate-spin')} />
+          Refresh
+        </button>
+        {triggerMsg && <span className="text-xs text-gray-400">{triggerMsg}</span>}
+      </div>
+
+      {withErrors.length > 0 && (
+        <div className="border border-amber-700/50 bg-amber-950/20 rounded-lg px-3 py-2.5 space-y-1">
+          <div className="flex items-center gap-1.5 text-amber-300 text-xs font-medium">
+            <AlertTriangle className="w-3.5 h-3.5" /> Delivery errors
+          </div>
+          {withErrors.map((w) => (
+            <p key={w.id} className="text-xs text-amber-200/80">
+              <span className="text-amber-200">{w.name}</span>: {w.delivery_error_count} failed
+              {w.last_delivery_error ? ` — ${w.last_delivery_error}` : ''}
+              {w.last_delivery_detail && (
+                <button
+                  type="button"
+                  className="ml-2 text-amber-300 underline hover:text-amber-200"
+                  onClick={() =>
+                    setDetailView({
+                      title: `${w.name} — delivery error`,
+                      detail: w.last_delivery_detail as DeliveryDetail,
+                    })
+                  }
+                >
+                  View details
+                </button>
+              )}
+            </p>
+          ))}
+        </div>
+      )}
+
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs text-gray-500 border-b border-gray-800">
+              <th className="py-2 pr-4">Name</th>
+              <th className="py-2 pr-4">Severity</th>
+              <th className="py-2 pr-4">Dataset</th>
+              <th className="py-2 pr-4">Mode</th>
+              <th className="py-2 pr-4">Format</th>
+              <th className="py-2 pr-4">Publish</th>
+              <th className="py-2 pr-4">Triggers</th>
+              <th className="py-2 pr-4">Last Triggered</th>
+              <th className="py-2 pr-4">Enabled</th>
+              <th className="py-2 pr-4">Feed URL</th>
+              <th className="py-2 pr-4"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {watchers.map((w) => (
+              <tr key={w.id} className="border-b border-gray-800/60">
+                <td className="py-2 pr-4 text-gray-200">{w.name}</td>
+                <td className="py-2 pr-4 text-gray-400">{w.severity}</td>
+                <td className="py-2 pr-4 text-gray-400">{w.dataset}</td>
+                <td className="py-2 pr-4 text-gray-400">
+                  {w.mode === 'scheduled' ? `scheduled (${w.interval_sec}s)` : 'realtime'}
+                </td>
+                <td className="py-2 pr-4 text-gray-400 uppercase">{w.format}</td>
+                <td className="py-2 pr-4 text-gray-400">
+                  {PUBLISH_TARGET_LABELS[w.publish_target]}
+                </td>
+                <td className="py-2 pr-4 tabular-nums text-gray-300">{w.trigger_count}</td>
+                <td className="py-2 pr-4 whitespace-nowrap text-gray-400">
+                  {formatTimestamp(w.last_triggered_at)}
+                </td>
+                <td className="py-2 pr-4">
+                  <Toggle
+                    checked={w.enabled}
+                    disabled={toggle.isPending}
+                    onChange={(v) => toggle.mutate({ id: w.id, enabled: v })}
+                  />
+                </td>
+                <td className="py-2 pr-4">
+                  <FeedLink id={w.id} />
+                </td>
+                <td className="py-2 pr-4">
+                  <button
+                    title="Evaluate now over stored events"
+                    className="btn-secondary text-xs inline-flex items-center gap-1"
+                    disabled={trigger.isPending && trigger.variables === w.id}
+                    onClick={() => {
+                      setTriggerMsg(null)
+                      trigger.mutate(w.id)
+                    }}
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    {trigger.isPending && trigger.variables === w.id ? 'Running…' : 'Trigger'}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {detailView && (
+        <WatcherDeliveryErrorModal
+          title={detailView.title}
+          detail={detailView.detail}
+          onClose={() => setDetailView(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+// ── Configuration tab ────────────────────────────────────────────────────────
+
+function ConfigTab() {
+  const qc = useQueryClient()
+  const { data: watchers } = useWatchers()
+  const [showForm, setShowForm] = useState(false)
+  const [editing, setEditing] = useState<Watcher | null>(null)
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [dirty, setDirty] = useState(false)
+  const [blockedMsg, setBlockedMsg] = useState<string | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null)
+
+  const formOpen = showForm || editing !== null
+
+  const toggle = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      api.watchers.setEnabled(id, enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['watchers'] }),
+  })
+  const remove = useMutation({
+    mutationFn: (id: string) => api.watchers.remove(id),
+    onSuccess: () => {
+      setConfirmingDelete(null)
+      qc.invalidateQueries({ queryKey: ['watchers'] })
+    },
+  })
+
+  const closeForm = () => {
+    setShowForm(false)
+    setEditing(null)
+    setDirty(false)
+    setBlockedMsg(null)
+  }
+
+  // Guard against silently discarding unsaved edits when the user starts a new
+  // create/edit while a dirty form is open. Allow the switch when the form is
+  // pristine; otherwise surface an inline message and keep the current form.
+  const requestOpenCreate = () => {
+    if (formOpen && dirty) {
+      setBlockedMsg('Finish or discard your current changes before adding another watcher.')
+      return
+    }
+    setBlockedMsg(null)
+    setEditing(null)
+    setShowForm(true)
+  }
+  const requestEdit = (w: Watcher) => {
+    if (editing?.id === w.id) return
+    if (formOpen && dirty) {
+      setBlockedMsg(`Finish or discard your current changes before editing "${w.name}".`)
+      return
+    }
+    setBlockedMsg(null)
+    setShowForm(false)
+    setEditing(w)
+  }
+
+  return (
+    <div className="space-y-4 max-w-3xl">
+      {!formOpen && (
+        <button className="btn-primary text-xs inline-flex items-center gap-1" onClick={requestOpenCreate}>
+          <Plus className="w-4 h-4" /> Add Watcher
+        </button>
+      )}
+
+      {blockedMsg && <p className="text-xs text-amber-400">{blockedMsg}</p>}
+
+      {formOpen && (
+        <WatcherForm
+          key={editing?.id ?? 'new'}
+          existing={watchers ?? []}
+          editing={editing}
+          onDirtyChange={setDirty}
+          onClose={closeForm}
+          onSaved={() => {
+            closeForm()
+            qc.invalidateQueries({ queryKey: ['watchers'] })
+          }}
+        />
+      )}
+
+      <div className="space-y-2">
+        {(watchers ?? []).map((w) => (
+          <div key={w.id} className="border border-gray-700 rounded-lg">
+            <div className="flex items-center justify-between px-3 py-2.5">
+              <button
+                className="flex items-center gap-2 text-left"
+                onClick={() => setExpanded(expanded === w.id ? null : w.id)}
+              >
+                {expanded === w.id ? (
+                  <ChevronUp className="w-4 h-4 text-gray-500" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-gray-500" />
+                )}
+                <span className="text-sm text-gray-200">{w.name}</span>
+                <span className="text-xs text-gray-500">
+                  {w.severity} · {w.dataset} · {w.mode}
+                </span>
+              </button>
+              <div className="flex items-center gap-3">
+                <Toggle
+                  checked={w.enabled}
+                  disabled={toggle.isPending}
+                  onChange={(v) => toggle.mutate({ id: w.id, enabled: v })}
+                />
+                <button
+                  title="Edit"
+                  className="text-gray-400 hover:text-gray-200"
+                  onClick={() => requestEdit(w)}
+                >
+                  <Pencil className="w-4 h-4" />
+                </button>
+                <button
+                  title="Delete"
+                  className="text-gray-400 hover:text-red-400"
+                  onClick={() => setConfirmingDelete(w.id)}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            {confirmingDelete === w.id && (
+              <div className="border-t border-gray-800 px-3 py-2.5 bg-red-950/20 flex items-center justify-between gap-3">
+                <span className="text-xs text-red-300">
+                  Delete watcher "{w.name}"? This permanently removes its triggered events.
+                </span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    className="btn-secondary text-xs"
+                    disabled={remove.isPending}
+                    onClick={() => setConfirmingDelete(null)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="text-xs px-2.5 py-1 rounded bg-red-700 hover:bg-red-600 text-white disabled:opacity-50"
+                    disabled={remove.isPending}
+                    onClick={() => remove.mutate(w.id)}
+                  >
+                    {remove.isPending ? 'Deleting…' : 'Confirm delete'}
+                  </button>
+                </div>
+              </div>
+            )}
+            {expanded === w.id && (
+              <div className="border-t border-gray-800 px-3 py-2.5 space-y-1 text-xs text-gray-400">
+                <p>Feeds: {w.feeds.length ? w.feeds.join(', ') : 'all'}</p>
+                <p>
+                  Conditions:{' '}
+                  {w.conditions.length
+                    ? w.conditions
+                        .map((c) => `${c.field || '*'} ${c.match_type} "${c.value}"`)
+                        .join(' AND ')
+                    : 'none'}
+                </p>
+                <p>Format: {w.format.toUpperCase()} · Max events: {w.max_feed_events}</p>
+                <FeedLink id={w.id} />
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ── Create / edit form ───────────────────────────────────────────────────────
+
+const EMPTY: WatcherInput = {
+  name: '',
+  severity: 'critical',
+  dataset: 'all',
+  feeds: [],
+  conditions: [],
+  mode: 'realtime',
+  interval_sec: 120,
+  format: 'json',
+  max_feed_events: 10,
+  cleanup_interval_sec: 60,
+  enabled: false,
+  publish_target: 'local',
+  webhook_url: null,
+  webhook_format: 'generic',
+  auth_header: null,
+  auth_value: null,
+}
+
+function WatcherForm({
+  existing,
+  editing,
+  onClose,
+  onSaved,
+  onDirtyChange,
+}: {
+  existing: Watcher[]
+  editing: Watcher | null
+  onClose: () => void
+  onSaved: () => void
+  onDirtyChange?: (dirty: boolean) => void
+}) {
+  const initial = useMemo<WatcherInput>(
+    () =>
+      editing
+        ? {
+            name: editing.name,
+            severity: editing.severity,
+            dataset: editing.dataset,
+            feeds: [...editing.feeds],
+            conditions: editing.conditions.map((c) => ({ ...c })),
+            mode: editing.mode,
+            interval_sec: editing.interval_sec,
+            format: editing.format,
+            max_feed_events: editing.max_feed_events,
+            cleanup_interval_sec: editing.cleanup_interval_sec ?? 60,
+            enabled: editing.enabled,
+            publish_target: editing.publish_target,
+            webhook_url: editing.webhook_url,
+            webhook_format: editing.webhook_format ?? 'generic',
+            auth_header: editing.auth_header,
+            auth_value: editing.auth_value,
+          }
+        : { ...EMPTY },
+    [editing],
+  )
+  const [form, setForm] = useState<WatcherInput>(initial)
+  const [error, setError] = useState<string | null>(null)
+
+  // Report dirtiness to the parent so it can guard against discarding edits.
+  const dirty = useMemo(
+    () => JSON.stringify(form) !== JSON.stringify(initial),
+    [form, initial],
+  )
+  useEffect(() => {
+    onDirtyChange?.(dirty)
+  }, [dirty, onDirtyChange])
+
+  const { data: feedsMeta } = useQuery({
+    queryKey: ['watcher-meta-feeds'],
+    queryFn: api.watchers.metaFeeds,
+  })
+  // Field list is feed-aware: re-derived from sampled stored events whenever the
+  // dataset or the selected feeds change, so per-source custom fields surface.
+  const sortedFeeds = useMemo(() => [...form.feeds].sort(), [form.feeds])
+  const { data: fieldsMeta } = useQuery({
+    queryKey: ['watcher-meta-fields', form.dataset, sortedFeeds],
+    queryFn: () => api.watchers.metaFields(form.dataset, form.feeds),
+  })
+
+  const set = <K extends keyof WatcherInput>(k: K, v: WatcherInput[K]) =>
+    setForm((f) => ({ ...f, [k]: v }))
+
+  const nameTaken = useMemo(() => {
+    const trimmed = form.name.trim().toLowerCase()
+    return existing.some(
+      (w) => w.name.trim().toLowerCase() === trimmed && (!editing || w.id !== editing.id),
+    )
+  }, [form.name, existing, editing])
+
+  const validInterval = form.mode !== 'scheduled' || form.interval_sec >= INTERVAL_MIN
+  const validMax = form.max_feed_events >= MAX_FEED_MIN && form.max_feed_events <= MAX_FEED_MAX
+  const validCleanup =
+    form.cleanup_interval_sec >= CLEANUP_INTERVAL_MIN &&
+    form.cleanup_interval_sec <= CLEANUP_INTERVAL_MAX
+  const hasCondition = form.conditions.length > 0
+  const numericConditionsValid = form.conditions.every(
+    (c) =>
+      (c.match_type !== 'gte' && c.match_type !== 'lte') ||
+      (c.value.trim() !== '' && !Number.isNaN(Number(c.value.trim()))),
+  )
+  const isRemoteTarget = form.publish_target !== 'local'
+  const validUrl =
+    !isRemoteTarget || /^https?:\/\/.+/i.test((form.webhook_url ?? '').trim())
+  // Auth header name and value must be provided together (or both empty).
+  const authComplete =
+    (!(form.auth_header ?? '').trim()) === (!(form.auth_value ?? '').trim())
+  const canSave =
+    form.name.trim() !== '' &&
+    !nameTaken &&
+    validInterval &&
+    validMax &&
+    validCleanup &&
+    hasCondition &&
+    numericConditionsValid &&
+    validUrl &&
+    authComplete
+
+  const save = useMutation({
+    mutationFn: (body: WatcherInput) =>
+      editing ? api.watchers.update(editing.id, body) : api.watchers.create(body),
+    onSuccess: onSaved,
+    onError: (err: unknown) => setError(err instanceof Error ? err.message : String(err)),
+  })
+
+  const addCondition = () =>
+    set('conditions', [...form.conditions, { field: '', value: '', match_type: 'exact' }])
+  const updateCondition = (i: number, patch: Partial<WatcherCondition>) =>
+    set(
+      'conditions',
+      form.conditions.map((c, idx) => (idx === i ? { ...c, ...patch } : c)),
+    )
+  const removeCondition = (i: number) =>
+    set('conditions', form.conditions.filter((_, idx) => idx !== i))
+
+  const toggleFeed = (name: string) =>
+    set('feeds', form.feeds.includes(name) ? form.feeds.filter((f) => f !== name) : [...form.feeds, name])
+
+  return (
+    <div className="border border-gray-700 rounded-lg p-4 space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-gray-200">
+          {editing ? `Edit "${editing.name}"` : 'New Watcher'}
+        </h2>
+        <button className="text-gray-500 hover:text-gray-300" onClick={onClose}>
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <label className="space-y-1">
+          <span className="text-xs text-gray-400">Name</span>
+          <input
+            className="input w-full"
+            value={form.name}
+            onChange={(e) => set('name', e.target.value)}
+          />
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs text-gray-400">Severity (label)</span>
+          <select className="input w-full" value={form.severity} onChange={(e) => set('severity', e.target.value as WatcherSeverity)}>
+            {SEVERITIES.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+          <span className="text-[11px] text-gray-500">
+            Classification label only — does not affect matching. To match on
+            severity, add a condition with field “severity”.
+          </span>
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs text-gray-400">Dataset</span>
+          <select className="input w-full" value={form.dataset} onChange={(e) => set('dataset', e.target.value as WatcherDataset)}>
+            {DATASETS.map((d) => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </select>
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs text-gray-400">Format</span>
+          <select className="input w-full" value={form.format} onChange={(e) => set('format', e.target.value as WatcherFormat)}>
+            {FORMATS.map((f) => (
+              <option key={f} value={f}>{f.toUpperCase()}</option>
+            ))}
+          </select>
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs text-gray-400">Mode</span>
+          <select className="input w-full" value={form.mode} onChange={(e) => set('mode', e.target.value as WatcherMode)}>
+            {MODES.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+        </label>
+        {form.mode === 'scheduled' && (
+          <label className="space-y-1">
+            <span className="text-xs text-gray-400">Interval (seconds)</span>
+            <input
+              type="number"
+              min={INTERVAL_MIN}
+              className="input w-full tabular-nums"
+              value={form.interval_sec}
+              onChange={(e) => set('interval_sec', Number(e.target.value))}
+            />
+          </label>
+        )}
+        <label className="space-y-1">
+          <span className="text-xs text-gray-400">Max feed events</span>
+          <input
+            type="number"
+            min={MAX_FEED_MIN}
+            max={MAX_FEED_MAX}
+            className="input w-full tabular-nums"
+            value={form.max_feed_events}
+            onChange={(e) => set('max_feed_events', Number(e.target.value))}
+          />
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs text-gray-400">Cleanup interval (seconds)</span>
+          <input
+            type="number"
+            min={CLEANUP_INTERVAL_MIN}
+            max={CLEANUP_INTERVAL_MAX}
+            className="input w-full tabular-nums"
+            value={form.cleanup_interval_sec}
+            onChange={(e) => set('cleanup_interval_sec', Number(e.target.value))}
+          />
+          <span className="text-[11px] text-gray-500">
+            How often the feed is trimmed back down to “Max feed events”.
+          </span>
+        </label>
+      </div>
+
+      {/* Feeds multiselect */}
+      <div className="space-y-1">
+        <p className="text-xs text-gray-400">Feeds (empty = all feeds)</p>
+        <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto border border-gray-800 rounded p-2">
+          {(feedsMeta?.feeds ?? []).map((name) => (
+            <button
+              key={name}
+              onClick={() => toggleFeed(name)}
+              className={clsx(
+                'text-xs px-2 py-0.5 rounded border',
+                form.feeds.includes(name)
+                  ? 'bg-blue-900/40 border-blue-600 text-blue-200'
+                  : 'border-gray-700 text-gray-400 hover:border-gray-500',
+              )}
+            >
+              {name}
+            </button>
+          ))}
+          {(feedsMeta?.feeds?.length ?? 0) === 0 && (
+            <span className="text-xs text-gray-600">No feeds available.</span>
+          )}
+        </div>
+      </div>
+
+      {/* Conditions */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-gray-400">Conditions (all must match · at least one required)</p>
+          <button className="text-xs text-blue-400 hover:underline inline-flex items-center gap-1" onClick={addCondition}>
+            <Plus className="w-3.5 h-3.5" /> Add condition
+          </button>
+        </div>
+        {form.conditions.length === 0 && (
+          <p className="text-xs text-amber-400">Add at least one condition to define what this watcher matches.</p>
+        )}
+        {form.conditions.map((c, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <select
+              className="input flex-1"
+              value={c.field}
+              onChange={(e) => updateCondition(i, { field: e.target.value })}
+            >
+              <option value="">(any field)</option>
+              {(fieldsMeta?.fields ?? []).map((f) => (
+                <option key={f} value={f}>{f}</option>
+              ))}
+            </select>
+            <select
+              className="input w-32"
+              value={c.match_type}
+              onChange={(e) => updateCondition(i, { match_type: e.target.value as WatcherMatchType })}
+            >
+              {MATCH_TYPES.map((m) => (
+                <option key={m} value={m}>{MATCH_TYPE_LABELS[m]}</option>
+              ))}
+            </select>
+            <input
+              className="input flex-1"
+              placeholder={c.match_type === 'gte' || c.match_type === 'lte' ? 'number' : 'value'}
+              value={c.value}
+              onChange={(e) => updateCondition(i, { value: e.target.value })}
+            />
+            {CASE_AWARE_MATCH_TYPES.has(c.match_type) && (
+              <label
+                className="flex items-center gap-1 text-[11px] text-gray-400 whitespace-nowrap"
+                title="Match this condition case-sensitively"
+              >
+                <input
+                  type="checkbox"
+                  checked={c.case_sensitive ?? false}
+                  onChange={(e) => updateCondition(i, { case_sensitive: e.target.checked })}
+                />
+                Aa
+              </label>
+            )}
+            <button className="text-gray-500 hover:text-red-400" onClick={() => removeCondition(i)}>
+              <Trash2 className="w-4 h-4" />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <label className="flex items-center gap-2">
+        <Toggle checked={form.enabled} onChange={(v) => set('enabled', v)} />
+        <span className="text-xs text-gray-400">Enabled</span>
+      </label>
+
+      {/* Publish target */}
+      <div className="space-y-2 border-t border-gray-800 pt-3">
+        <label className="space-y-1 block max-w-xs">
+          <span className="text-xs text-gray-400">Publish on</span>
+          <select
+            className="input w-full"
+            value={form.publish_target}
+            onChange={(e) => {
+              const target = e.target.value as WatcherPublishTarget
+              setForm((f) => ({
+                ...f,
+                publish_target: target,
+                ...(target === 'local'
+                  ? { webhook_url: null, auth_header: null, auth_value: null, webhook_format: 'generic' as WatcherWebhookFormat }
+                  : target === 'http'
+                    ? { webhook_format: 'generic' as WatcherWebhookFormat }
+                    : { webhook_format: detectWebhookFormat(f.webhook_url) }),
+              }))
+            }}
+          >
+            {PUBLISH_TARGETS.map((t) => (
+              <option key={t} value={t}>{PUBLISH_TARGET_LABELS[t]}</option>
+            ))}
+          </select>
+          <span className="text-[11px] text-gray-500">
+            {form.publish_target === 'local'
+              ? 'Events are served from this watcher’s public feed URL only.'
+              : form.publish_target === 'webhook'
+                ? 'POST each event to the URL below using the selected webhook format.'
+                : 'POST the bare event JSON to the URL below (listener-compatible shape).'}
+          </span>
+        </label>
+
+        {isRemoteTarget && (
+          <div className="grid grid-cols-2 gap-3 max-w-xl">
+            <label className="space-y-1 col-span-2">
+              <span className="text-xs text-gray-400">Destination URL</span>
+              <input
+                className="input w-full"
+                placeholder="https://example.com/hook"
+                value={form.webhook_url ?? ''}
+                onChange={(e) => {
+                  const url = e.target.value || null
+                  setForm((f) => ({
+                    ...f,
+                    webhook_url: url,
+                    // Auto-select a chat format from the URL host, but only for
+                    // the webhook target and only while the user hasn't picked a
+                    // non-generic format manually.
+                    ...(f.publish_target === 'webhook' && f.webhook_format === 'generic'
+                      ? { webhook_format: detectWebhookFormat(url) }
+                      : {}),
+                  }))
+                }}
+              />
+            </label>
+            {form.publish_target === 'webhook' && (
+              <label className="space-y-1 col-span-2">
+                <span className="text-xs text-gray-400">Webhook format</span>
+                <select
+                  className="input w-full"
+                  value={form.webhook_format}
+                  onChange={(e) => set('webhook_format', e.target.value as WatcherWebhookFormat)}
+                >
+                  {WEBHOOK_FORMATS.map((fmt) => (
+                    <option key={fmt} value={fmt}>{WEBHOOK_FORMAT_LABELS[fmt]}</option>
+                  ))}
+                </select>
+                <span className="text-[11px] text-gray-500">
+                  {form.webhook_format === 'generic'
+                    ? 'POST the ThreatFeeds envelope (watcher metadata + event).'
+                    : form.webhook_format === 'discord'
+                      ? 'POST a Discord webhook message ({"content": …}).'
+                      : form.webhook_format === 'slack'
+                        ? 'POST a Slack / Mattermost message ({"text": …}).'
+                        : 'POST a Microsoft Teams MessageCard connector payload.'}
+                </span>
+              </label>
+            )}
+            <label className="space-y-1">
+              <span className="text-xs text-gray-400">Auth header (optional)</span>
+              <input
+                className="input w-full"
+                placeholder="Authorization"
+                value={form.auth_header ?? ''}
+                onChange={(e) => set('auth_header', e.target.value || null)}
+              />
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs text-gray-400">Auth value (optional)</span>
+              <input
+                className="input w-full"
+                placeholder="Bearer …"
+                value={form.auth_value ?? ''}
+                onChange={(e) => set('auth_value', e.target.value || null)}
+              />
+            </label>
+          </div>
+        )}
+      </div>
+
+      {nameTaken && <p className="text-xs text-red-400">A watcher with this name already exists.</p>}
+      {!hasCondition && <p className="text-xs text-red-400">At least one condition is required.</p>}
+      {!numericConditionsValid && (
+        <p className="text-xs text-red-400">Numeric (≥/≤) conditions require a numeric value.</p>
+      )}
+      {!validInterval && <p className="text-xs text-red-400">Interval must be at least {INTERVAL_MIN} seconds.</p>}
+      {!validMax && (
+        <p className="text-xs text-red-400">
+          Max feed events must be between {MAX_FEED_MIN} and {MAX_FEED_MAX.toLocaleString()}.
+        </p>
+      )}
+      {!validUrl && (
+        <p className="text-xs text-red-400">
+          A valid http(s) destination URL is required for this publish target.
+        </p>
+      )}
+      {!authComplete && (
+        <p className="text-xs text-red-400">
+          Auth header name and value must both be set, or both left empty.
+        </p>
+      )}
+      {error && <p className="text-xs text-red-400">{error}</p>}
+
+      <div className="flex items-center gap-2">
+        <button
+          className="btn-primary text-xs"
+          disabled={!canSave || save.isPending}
+          onClick={() => {
+            setError(null)
+            save.mutate(form)
+          }}
+        >
+          {save.isPending ? 'Saving…' : editing ? 'Save changes' : 'Create watcher'}
+        </button>
+        <button className="btn-secondary text-xs" onClick={onClose}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Activity tab ─────────────────────────────────────────────────────────────
+
+const PAGE_SIZE = 50
+
+function ActivityTab() {
+  const { data: watchers } = useWatchers()
+  const [selected, setSelected] = useState<string>('')
+  const [page, setPage] = useState(0)
+
+  useEffect(() => {
+    if (!selected && watchers && watchers.length > 0) setSelected(watchers[0].id)
+  }, [watchers, selected])
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['watcher-events', selected, page],
+    queryFn: () => api.watchers.events(selected, { limit: PAGE_SIZE, offset: page * PAGE_SIZE }),
+    enabled: !!selected,
+  })
+
+  if (!watchers || watchers.length === 0)
+    return <p className="text-sm text-gray-500">No watchers yet.</p>
+
+  const selectedWatcher = watchers.find((w) => w.id === selected)
+  const publishLabel = selectedWatcher ? watcherPublishLabel(selectedWatcher) : '—'
+  const total = data?.total ?? 0
+  const maxPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1)
+
+  return (
+    <div className="space-y-4">
+      <label className="space-y-1 inline-block">
+        <span className="text-xs text-gray-400">Watcher</span>
+        <select
+          className="input w-64 block"
+          value={selected}
+          onChange={(e) => {
+            setSelected(e.target.value)
+            setPage(0)
+          }}
+        >
+          {watchers.map((w) => (
+            <option key={w.id} value={w.id}>{w.name}</option>
+          ))}
+        </select>
+      </label>
+
+      {isLoading ? (
+        <p className="text-sm text-gray-500">Loading…</p>
+      ) : !data || data.events.length === 0 ? (
+        <p className="text-sm text-gray-500">No triggered events.</p>
+      ) : (
+        <>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-xs">
+              <thead>
+                <tr className="text-left text-gray-500 border-b border-gray-800">
+                  <th className="py-2 pr-4">Triggered</th>
+                  <th className="py-2 pr-4">Dataset</th>
+                  <th className="py-2 pr-4">Source</th>
+                  <th className="py-2 pr-4">Publish</th>
+                  <th className="py-2 pr-4">Delivery</th>
+                  <th className="py-2 pr-4">Event</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.events.map((ev) => (
+                  <tr key={ev.id} className="border-b border-gray-800/60 align-top">
+                    <td className="py-2 pr-4 whitespace-nowrap text-gray-400">{ev.triggered_at}</td>
+                    <td className="py-2 pr-4 text-gray-400">{ev.dataset}</td>
+                    <td className="py-2 pr-4 text-gray-400">{ev.source_name ?? '—'}</td>
+                    <td className="py-2 pr-4 whitespace-nowrap text-gray-400">{publishLabel}</td>
+                    <td className="py-2 pr-4 whitespace-nowrap">
+                      <DeliveryCell ev={ev} />
+                    </td>
+                    <td className="py-2 pr-4">
+                      <pre className="font-mono text-[11px] text-gray-300 whitespace-pre-wrap break-all max-w-2xl">
+                        {JSON.stringify(ev.event, null, 0)}
+                      </pre>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex items-center gap-3 text-xs text-gray-400">
+            <button
+              className="btn-secondary text-xs"
+              disabled={page <= 0}
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+            >
+              Prev
+            </button>
+            <span>
+              Page {page + 1} of {maxPage + 1} · {total} total
+            </span>
+            <button
+              className="btn-secondary text-xs"
+              disabled={page >= maxPage}
+              onClick={() => setPage((p) => Math.min(maxPage, p + 1))}
+            >
+              Next
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function DeliveryCell({ ev }: { ev: WatcherEvent }) {
+  const [showDetail, setShowDetail] = useState(false)
+  if (ev.delivery_status === 'ok')
+    return <span className="text-green-400">delivered</span>
+  if (ev.delivery_status === 'error') {
+    if (ev.delivery_detail) {
+      return (
+        <>
+          <button
+            type="button"
+            className="text-red-400 underline hover:text-red-300"
+            title={ev.delivery_error ?? undefined}
+            onClick={() => setShowDetail(true)}
+          >
+            failed
+          </button>
+          {showDetail && (
+            <WatcherDeliveryErrorModal
+              title={`Event #${ev.id} — delivery error`}
+              detail={ev.delivery_detail}
+              onClose={() => setShowDetail(false)}
+            />
+          )}
+        </>
+      )
+    }
+    return (
+      <span className="text-red-400" title={ev.delivery_error ?? undefined}>
+        failed
+      </span>
+    )
+  }
+  return <span className="text-gray-600">—</span>
+}

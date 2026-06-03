@@ -53,7 +53,7 @@
 // shell, but it is still listed here so reverse-proxy alias auto-detection
 // recognises e.g. https://host/feeds/login → prefix "/feeds". App.tsx derives
 // the in-shell SHELL_ROUTES by excluding 'login'.
-export const KNOWN_ROUTES = ['viewer', 'configuration', 'normalizer', 'account', 'about', 'login'] as const
+export const KNOWN_ROUTES = ['viewer', 'configuration', 'normalizer', 'watchers', 'account', 'about', 'login'] as const
 
 let cached: string | null = null
 

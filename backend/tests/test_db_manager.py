@@ -353,3 +353,46 @@ async def test_query_entries_unknown_field_filter_is_ignored(temp_data_dir):
     )
     assert len(rows) == 1
     assert rows[0]["indicator"] == "3.3.3.3"
+
+
+# ── on-demand field derivation for Raw-table defaults (issue_local_009 rev1) ──
+
+
+@pytest.mark.asyncio
+async def test_get_recently_populated_fields(temp_data_dir):
+    """Derives populated field names from recent entries, excluding internal/
+    always-shown columns and empty values, ranked by frequency."""
+    from backend.db.manager import insert_entry, get_recently_populated_fields
+
+    # Two entries: cve_id populated in both, actor in one, title always empty.
+    await insert_entry("fp_src", {
+        "source": "fp_src", "indicator": "1.1.1.1", "indicator_type": "ip",
+        "cve_id": "CVE-2026-1", "actor": "APT-X", "title": "",
+        "published_at": "2026-01-01",
+    })
+    await insert_entry("fp_src", {
+        "source": "fp_src", "indicator": "2.2.2.2", "indicator_type": "ip",
+        "cve_id": "CVE-2026-2", "title": "",
+        "published_at": "2026-01-02",
+    })
+
+    fields = await get_recently_populated_fields()
+
+    assert "cve_id" in fields
+    assert "indicator" in fields
+    assert "indicator_type" in fields
+    assert "actor" in fields
+    # Empty / internal / always-shown columns are excluded.
+    assert "title" not in fields
+    assert "source" not in fields
+    assert "ingested_at" not in fields
+    assert "extra" not in fields
+    # cve_id (2 hits) ranks ahead of actor (1 hit).
+    assert fields.index("cve_id") < fields.index("actor")
+
+
+@pytest.mark.asyncio
+async def test_get_recently_populated_fields_empty(temp_data_dir):
+    from backend.db.manager import get_recently_populated_fields
+
+    assert await get_recently_populated_fields() == []

@@ -17,9 +17,11 @@ from backend.config.loader import (
     load_app_base_prefix,
     load_app_pagination_max,
     load_logo_path,
+    load_watcher_max_events,
     save_app_base_prefix,
     save_app_pagination_max,
     save_logo_path,
+    save_watcher_max_events,
 )
 
 router = APIRouter(prefix="/api/app", tags=["app"])
@@ -124,6 +126,36 @@ async def set_pagination_max(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"pagination_max": value}
+
+
+@router.get("/watcher-max-events")
+async def get_watcher_max_events() -> dict[str, int]:
+    """Return the per-watcher stored/feed event cap (default 1000)."""
+    return {"watcher_max_events": load_watcher_max_events()}
+
+
+@router.put("/watcher-max-events")
+async def set_watcher_max_events(
+    body: dict[str, Any],
+    _admin: dict | None = Depends(require_admin_when_enabled),
+) -> dict[str, Any]:
+    """Set the per-watcher stored/feed event cap.
+
+    Body: {"watcher_max_events": <int in [10, 100000]>}. Takes effect on the
+    next watcher evaluation, so no restart is required.
+    """
+    value = body.get("watcher_max_events")
+    # Reject bools (int subclass) and any non-int payload before the loader.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HTTPException(
+            status_code=400,
+            detail="Body must contain 'watcher_max_events' as an integer",
+        )
+    try:
+        save_watcher_max_events(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"watcher_max_events": value}
 
 
 # ── Branding logo endpoints (prompts-045) ────────────────────────────────────

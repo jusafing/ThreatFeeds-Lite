@@ -68,3 +68,21 @@ def setup_logging(log_dir: Path) -> None:
     audit_handler.setLevel(logging.INFO)
     audit_handler.setFormatter(formatter)
     audit_logger.addHandler(audit_handler)
+
+    # ── Watchers logger ──────────────────────────────────────────────────────
+    # Dedicated channel for watcher evaluation / trigger / error events
+    # (issue_local_006). Propagates through the root handlers above and also
+    # writes its own file so operators can audit watcher activity in isolation.
+    watchers_logger = logging.getLogger("backend.watchers")
+    watchers_logger.setLevel(logging.DEBUG)
+    watchers_logger.propagate = True
+
+    watchers_handler = logging.handlers.RotatingFileHandler(
+        log_dir / "watchers.log",
+        maxBytes=_MAX_BYTES,
+        backupCount=_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    watchers_handler.setLevel(logging.INFO)
+    watchers_handler.setFormatter(formatter)
+    watchers_logger.addHandler(watchers_handler)

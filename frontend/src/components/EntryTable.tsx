@@ -33,17 +33,28 @@ function sourceColourClass(name: string): string {
 }
 
 // Known schema columns — shown first in the column picker, in this stable order.
+// issue_local_009: `ingested_at` is pinned to the 2nd position (right after the
+// `source`/feed column) both in the picker order and the rendered table.
 const SCHEMA_COLUMNS = [
-  'source', 'indicator', 'indicator_type', 'threat_type', 'severity',
-  'title', 'tlp', 'published_at', 'cve_id', 'cvss_score',
-  'mitre_attack_id', 'actor', 'country', 'ingest_mode', 'ingested_at',
+  'source', 'ingested_at', 'indicator', 'indicator_type', 'threat_type',
+  'severity', 'title', 'tlp', 'published_at', 'cve_id', 'cvss_score',
+  'mitre_attack_id', 'actor', 'country', 'ingest_mode',
 ]
 
 // Hidden from picker — internal/ID columns of no interest.
 const HIDDEN_FROM_PICKER = new Set(['id', 'dedup_key', 'normalized', 'extra'])
 
+// Columns always present in the default view, in this order. The remaining
+// default slots (up to DEFAULT_VISIBLE_LIMIT) are filled from the server's
+// field-presence ranking (fields that actually carry content). See the
+// default-columns effect below.
+const ALWAYS_VISIBLE = ['source', 'ingested_at']
+const DEFAULT_VISIBLE_LIMIT = 15
+
+// Fallback default-visible set used until the field-presence query resolves
+// (or when no presence data exists yet).
 const DEFAULT_VISIBLE = new Set([
-  'source', 'indicator', 'indicator_type', 'threat_type', 'severity', 'title', 'ingested_at',
+  'source', 'ingested_at', 'indicator', 'indicator_type', 'threat_type', 'severity', 'title',
 ])
 
 // Auto-collapse per-source extra-column groups when there are MORE than
@@ -68,6 +79,11 @@ export default function EntryTable() {
   const [schemaExpanded, setSchemaExpanded] = useState(true)
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [groupsInitialised, setGroupsInitialised] = useState(false)
+  // issue_local_009: the default visible columns are derived once from the
+  // server's field-presence ranking (fields that actually carry content).
+  // Computed a single time so the user's subsequent manual column toggles are
+  // not clobbered by the periodic refetch.
+  const [defaultsApplied, setDefaultsApplied] = useState(false)
 
   // Debounce search
   useEffect(() => {
@@ -96,6 +112,37 @@ export default function EntryTable() {
   const sourcenames = summaryData
     .filter(r => r.source !== '__total__')
     .map(r => r.source)
+
+  // issue_local_009: field names that carry content in the most recent entries,
+  // derived server-side on demand when this table opens. Drives the default
+  // visible columns so they reflect the latest ingested data of any feed.
+  const { data: presenceFields } = useQuery<string[]>({
+    queryKey: ['field-presence'],
+    queryFn: () => api.getFieldPresence(),
+    staleTime: 60_000,
+  })
+
+  // Apply the default-visible set ONCE, as soon as field-presence resolves.
+  // Always pins source + ingested_at first, then fills up to
+  // DEFAULT_VISIBLE_LIMIT from the populated-field ranking. Falls back to the
+  // static DEFAULT_VISIBLE when no presence data exists yet.
+  useEffect(() => {
+    if (defaultsApplied || presenceFields === undefined) return
+    const ranked = presenceFields.filter(
+      f => !HIDDEN_FROM_PICKER.has(f) && !ALWAYS_VISIBLE.includes(f),
+    )
+    if (ranked.length === 0) {
+      setDefaultsApplied(true)
+      return
+    }
+    const next = new Set<string>(ALWAYS_VISIBLE)
+    for (const f of ranked) {
+      if (next.size >= DEFAULT_VISIBLE_LIMIT) break
+      next.add(f)
+    }
+    setVisibleCols(next)
+    setDefaultsApplied(true)
+  }, [presenceFields, defaultsApplied])
 
   const toggleCol = useCallback((col: string) => {
     setVisibleCols(prev => {

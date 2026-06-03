@@ -82,6 +82,48 @@ async def test_push_sync_still_returns_ingest_response(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sync_push_triggers_realtime_watchers(monkeypatch):
+    """review_02: the synchronous push path must fire realtime watchers so an
+    event sent via the API client triggers matching watchers (previously only
+    the background-job path did)."""
+    import backend.watchers.engine as wengine
+
+    seen: list[int] = []
+    monkeypatch.setattr(wengine, "schedule_realtime_ingest_eval", lambda n: seen.append(n))
+
+    async def fake_process_push(payload, source_name, job_id=None):
+        return {"inserted": 3, "skipped": 0, "total_read": 3, "duplicates": 0, "discarded": 0}
+
+    monkeypatch.setattr(ri, "process_push", fake_process_push)
+
+    bg = BackgroundTasks()
+    await ri.push_ingest("srcA", {"indicator": "x"}, bg, background=False)
+    assert seen == [3]
+
+
+@pytest.mark.asyncio
+async def test_sync_listener_triggers_realtime_watchers(monkeypatch):
+    """The generic /listener push (used by the api_client `send` command) also
+    fires realtime watchers synchronously."""
+    import backend.watchers.engine as wengine
+    from fastapi import Request
+
+    seen: list[int] = []
+    monkeypatch.setattr(wengine, "schedule_realtime_ingest_eval", lambda n: seen.append(n))
+    monkeypatch.setattr(ri, "_listener_enabled", lambda: True)
+
+    async def fake_process_push(payload, source_name, job_id=None):
+        return {"inserted": 1, "skipped": 0, "total_read": 1, "duplicates": 0, "discarded": 0}
+
+    monkeypatch.setattr(ri, "process_push", fake_process_push)
+
+    req = Request({"type": "http", "headers": [], "state": {}})
+    bg = BackgroundTasks()
+    await ri.listener_ingest({"indicator": "x"}, bg, req, background=False)
+    assert seen == [1]
+
+
+@pytest.mark.asyncio
 async def test_confirm_local_preview_background(monkeypatch):
     """POST /api/ingest/preview/confirm/{id}?background=true returns job_id and ingests in background."""
 

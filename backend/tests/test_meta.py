@@ -56,3 +56,4 @@ async def test_get_meta_no_filter_returns_all(isolated_meta):
     await meta_mod.record_ingest("b", {"total_read": 2, "inserted": 2, "duplicates": 0, "discarded": 0})
     rows = await meta_mod.get_meta(None)
     assert set(rows.keys()) == {"a", "b"}
+

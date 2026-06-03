@@ -138,6 +138,7 @@ class JobStore:
         logger.debug("job_done id=%s counters=%s", job_id, counters)
         self._persist_meta(job)
         self._maybe_trigger_smart_mode(job)
+        self._maybe_trigger_watchers(job)
 
     def fail(self, job_id: str, error_msg: str) -> None:
         job = self._jobs.get(job_id)
@@ -204,6 +205,22 @@ class JobStore:
         loop.create_task(
             scheduler_mod.submit_smart_job(job.source, reason="on_new_feed")
         )
+
+    # ── Watcher trigger (issue_local_006) ────────────────────────────────────
+
+    def _maybe_trigger_watchers(self, job: Job) -> None:
+        """Evaluate realtime watchers against the raw dataset when this job
+        actually indexed new events.
+
+        Delegates to the shared engine hook so the background-job path and the
+        synchronous ingest routes trigger watchers identically. No-op when
+        nothing was inserted or when not inside an event loop.
+        """
+        try:
+            from backend.watchers.engine import schedule_realtime_ingest_eval  # noqa: WPS433
+        except Exception:  # pragma: no cover — defensive
+            return
+        schedule_realtime_ingest_eval(int(job.counters.get("inserted", 0) or 0))
 
     # ── Maintenance ──────────────────────────────────────────────────────────
 

@@ -162,6 +162,50 @@ def reload() -> None:
         )
         logger.info("Scheduled smart_mode every %dm", interval)
 
+    # ── Watchers (issue_local_006) ─────────────────────────────────────────
+    # One interval job per enabled 'scheduled'-mode watcher. Realtime watchers
+    # are driven by the ingest/normalize completion hooks instead, so they are
+    # NOT scheduled here. Read synchronously (sqlite3) since reload() runs
+    # outside an event loop.
+    try:
+        from backend.db.watchers import list_scheduled_watchers_sync
+        from backend.watchers.engine import evaluate_watcher_by_id
+
+        for w in list_scheduled_watchers_sync():
+            seconds = max(int(w["interval_sec"]), 5)
+            scheduler.add_job(
+                evaluate_watcher_by_id,
+                trigger="interval",
+                seconds=seconds,
+                args=[w["id"]],
+                id=f"watcher__{w['id']}",
+                replace_existing=True,
+            )
+            logger.info("Scheduled watcher '%s' every %ds", w["id"], seconds)
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("Watcher scheduling skipped: %s", exc)
+
+    # ── Watcher feed-retention cleanup (issue_local_008) ───────────────────
+    # One interval job per watcher (regardless of enabled state) that trims its
+    # stored feed down to max_feed_events. Immediate inserts keep up to the
+    # global watcher_max_events hard limit; this enforces the per-watcher cap.
+    try:
+        from backend.db.watchers import list_watchers_cleanup_sync, run_watcher_cleanup
+
+        for w in list_watchers_cleanup_sync():
+            seconds = max(int(w["cleanup_interval_sec"]), 10)
+            scheduler.add_job(
+                run_watcher_cleanup,
+                trigger="interval",
+                seconds=seconds,
+                args=[w["id"]],
+                id=f"watcher_cleanup__{w['id']}",
+                replace_existing=True,
+            )
+            logger.info("Scheduled watcher cleanup '%s' every %ds", w["id"], seconds)
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("Watcher cleanup scheduling skipped: %s", exc)
+
 
 def start() -> None:
     """Start the scheduler. Idempotent."""

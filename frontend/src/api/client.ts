@@ -422,6 +422,11 @@ export const api = {
   getSummary: (opts: { includeActive?: boolean } = {}) =>
     request<SummaryItem[]>(`/viewer/summary${opts.includeActive ? '?include_active=true' : ''}`),
 
+  // issue_local_009: field names seen populated by ingestion, most-relevant
+  // first. Used by the Raw Feeds table to pick its default visible columns.
+  getFieldPresence: () =>
+    request<{ fields: string[] }>('/viewer/field-presence').then(r => r.fields),
+
   // Fields
   getFields: () => request<FieldsConfig>('/fields'),
   toggleCoreField: (name: string, enabled: boolean) =>
@@ -608,6 +613,14 @@ export const api = {
     request<{ pagination_max: number }>('/app/pagination-max', {
       method: 'PUT',
       body: JSON.stringify({ pagination_max: value }),
+    }),
+
+  // Application — per-watcher stored/feed event cap (issue_local_006)
+  getWatcherMaxEvents: () => request<{ watcher_max_events: number }>('/app/watcher-max-events'),
+  setWatcherMaxEvents: (value: number) =>
+    request<{ watcher_max_events: number }>('/app/watcher-max-events', {
+      method: 'PUT',
+      body: JSON.stringify({ watcher_max_events: value }),
     }),
 
   // Application — branding logo (prompts-045)
@@ -831,6 +844,50 @@ export const api = {
       request<MappingVersionDiffResponse>(
         `/normalizer/mappings/diff?from=${fromId}&to=${toId}`,
       ),
+  },
+
+  // Watchers (issue_local_006) — admin CRUD + triggered-event reader.
+  watchers: {
+    list: () => request<Watcher[]>('/watchers'),
+    get: (id: string) => request<Watcher>(`/watchers/${encodeURIComponent(id)}`),
+    create: (body: WatcherInput) =>
+      request<Watcher>('/watchers', { method: 'POST', body: JSON.stringify(body) }),
+    update: (id: string, body: WatcherInput) =>
+      request<Watcher>(`/watchers/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      }),
+    setEnabled: (id: string, enabled: boolean) =>
+      request<Watcher>(`/watchers/${encodeURIComponent(id)}/enabled`, {
+        method: 'PUT',
+        body: JSON.stringify({ enabled }),
+      }),
+    remove: (id: string) =>
+      request<void>(`/watchers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    trigger: (id: string) =>
+      request<WatcherTriggerResult>(
+        `/watchers/${encodeURIComponent(id)}/trigger`,
+        { method: 'POST' },
+      ),
+    events: (id: string, params: { limit?: number; offset?: number } = {}) => {
+      const q = new URLSearchParams()
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== null) q.set(k, String(v))
+      })
+      const qs = q.toString()
+      return request<WatcherEventsPage>(
+        `/watchers/${encodeURIComponent(id)}/events${qs ? `?${qs}` : ''}`,
+      )
+    },
+    metaFeeds: () => request<{ feeds: string[] }>('/watchers/meta/feeds'),
+    metaFields: (dataset: WatcherDataset = 'all', feeds: string[] = []) => {
+      const q = new URLSearchParams()
+      q.set('dataset', dataset)
+      feeds.forEach((f) => {
+        if (f) q.append('feeds', f)
+      })
+      return request<{ fields: string[] }>(`/watchers/meta/fields?${q.toString()}`)
+    },
   },
 }
 
@@ -1188,4 +1245,86 @@ export interface MappingVersionDiffResponse {
   from: { id: number; source_name: string }
   to: { id: number; source_name: string }
   diff: MappingVersionDiff
+}
+
+// ── Watchers (issue_local_006) ─────────────────────────────────────────────
+
+export type WatcherSeverity = 'low' | 'medium' | 'high' | 'critical'
+export type WatcherDataset = 'all' | 'raw' | 'normalized'
+export type WatcherMode = 'realtime' | 'scheduled'
+export type WatcherFormat = 'json' | 'csv' | 'xml'
+export type WatcherMatchType = 'exact' | 'wildcard' | 'regex' | 'gte' | 'lte' | 'contains'
+export type WatcherPublishTarget = 'local' | 'webhook' | 'http'
+export type WatcherWebhookFormat = 'generic' | 'discord' | 'slack' | 'teams'
+
+export interface WatcherCondition {
+  field: string
+  value: string
+  match_type: WatcherMatchType
+  case_sensitive?: boolean
+}
+
+export interface DeliveryDetail {
+  url?: string
+  error_type?: string
+  message?: string
+  status?: number | null
+  reason?: string | null
+  headers?: Record<string, string> | null
+  body?: string
+}
+
+export interface WatcherInput {
+  name: string
+  severity: WatcherSeverity
+  dataset: WatcherDataset
+  feeds: string[]
+  conditions: WatcherCondition[]
+  mode: WatcherMode
+  interval_sec: number
+  format: WatcherFormat
+  max_feed_events: number
+  cleanup_interval_sec: number
+  enabled: boolean
+  publish_target: WatcherPublishTarget
+  webhook_url: string | null
+  webhook_format: WatcherWebhookFormat
+  auth_header: string | null
+  auth_value: string | null
+}
+
+export interface Watcher extends WatcherInput {
+  id: string
+  trigger_count: number
+  created_at: string
+  updated_at: string
+  last_triggered_at: string | null
+  delivery_error_count: number
+  last_delivery_error: string | null
+  last_delivery_detail: DeliveryDetail | null
+}
+
+export interface WatcherEvent {
+  id: number
+  watcher_id: string
+  dataset: string
+  source_entry_id: number
+  source_name: string | null
+  triggered_at: string
+  event: Record<string, unknown>
+  delivery_status: 'ok' | 'error' | null
+  delivery_error: string | null
+  delivery_detail: DeliveryDetail | null
+  delivered_at: string | null
+}
+
+export interface WatcherEventsPage {
+  events: WatcherEvent[]
+  total: number
+}
+
+export interface WatcherTriggerResult {
+  evaluated: number
+  triggered: number
+  delivery: { delivered: number; failed: number }
 }

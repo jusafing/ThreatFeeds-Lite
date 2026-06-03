@@ -26,6 +26,8 @@ from backend.api.routes_query import router as query_router
 from backend.api.routes_smart import router as smart_router
 from backend.api.routes_sources import router as sources_router
 from backend.api.routes_viewer import router as viewer_router
+from backend.api.routes_watchers import router as watchers_router
+from backend.api.routes_feed import router as feed_router
 from backend.config.loader import load_app_base_prefix, load_auth_enabled
 from backend.auth.db import init_users_db
 from backend.auth.service import (
@@ -41,6 +43,7 @@ from backend.normalizer.mappings import (
 from backend.normalizer.consolidated import init_consolidated_db
 from backend.normalizer.proposals import init_proposals_db
 from backend.normalizer.run_history import init_run_history_db
+from backend.db.watchers import init_watchers_db
 from backend.logging_config import setup_logging
 from backend import scheduler as scheduler_mod
 
@@ -86,6 +89,12 @@ async def lifespan(app: FastAPI):
         await init_run_history_db()
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("Run history init failed: %s", exc)
+    # issue_local_006: init the watchers store (its own DB file, never wiped by
+    # a normalized.db schema bump). Safe to re-run on every startup.
+    try:
+        await init_watchers_db()
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("Watchers DB init failed: %s", exc)
     # prompts-045: when authentication is enabled, ensure the users/sessions
     # store exists and bootstrap a first-run admin account. When auth is
     # disabled the app stays fully open and this is skipped entirely.
@@ -137,6 +146,12 @@ app.include_router(llm_router)
 app.include_router(smart_router)
 app.include_router(mappings_router)
 app.include_router(auth_router)
+app.include_router(watchers_router)
+# Public per-watcher feed (issue_local_006). Registered before the SPA
+# catch-all (defined later in this module) so /feed/watcher/<id>/ resolves to
+# the renderer rather than the index.html fallback. It lives OUTSIDE /api/ so
+# the auth middleware (which only guards /api/) leaves it public by design.
+app.include_router(feed_router)
 
 
 # ── Authentication enforcement (prompts-045) ──────────────────────────────────
