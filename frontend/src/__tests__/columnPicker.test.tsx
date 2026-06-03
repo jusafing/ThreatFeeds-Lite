@@ -23,6 +23,7 @@ vi.mock('../api/client', async () => {
     api: {
       getEntries: vi.fn(),
       getSummary: vi.fn(),
+      getFieldPresence: vi.fn().mockResolvedValue([]),
     },
   }
 })

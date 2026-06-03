@@ -56,3 +56,36 @@ async def test_get_meta_no_filter_returns_all(isolated_meta):
     await meta_mod.record_ingest("b", {"total_read": 2, "inserted": 2, "duplicates": 0, "discarded": 0})
     rows = await meta_mod.get_meta(None)
     assert set(rows.keys()) == {"a", "b"}
+
+
+# ── field_presence (issue_local_009) ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_field_presence_empty_when_unrecorded(isolated_meta):
+    assert await meta_mod.get_field_presence() == []
+
+
+@pytest.mark.asyncio
+async def test_record_field_presence_accumulates_and_orders(isolated_meta):
+    from datetime import datetime, timezone
+
+    t0 = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    t1 = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    # First batch: cve_id seen 3x, actor 1x at t0.
+    await meta_mod.record_field_presence({"cve_id": 3, "actor": 1}, when=t0)
+    # Later batch (more recent timestamp): actor seen again — recency wins.
+    await meta_mod.record_field_presence({"actor": 1}, when=t1)
+
+    fields = await meta_mod.get_field_presence()
+    # actor is most recent; cve_id older. Both populated.
+    assert fields[0] == "actor"
+    assert set(fields) == {"actor", "cve_id"}
+
+
+@pytest.mark.asyncio
+async def test_record_field_presence_ignores_empty_and_zero(isolated_meta):
+    await meta_mod.record_field_presence({})
+    await meta_mod.record_field_presence({"never": 0})
+    assert await meta_mod.get_field_presence() == []
+

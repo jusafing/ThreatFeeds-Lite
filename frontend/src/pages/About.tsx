@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
-import { Rss, GitCommit, Tag, Activity, Users, Scale } from 'lucide-react'
+import { Rss, GitCommit, Tag, Activity, Github, Scale } from 'lucide-react'
 
 declare const __APP_VERSION__: string
 declare const __GIT_COMMIT__: string
@@ -65,15 +65,24 @@ export default function About() {
           </div>
 
           <div className="flex items-center gap-3">
-            <Users className="w-4 h-4 text-brand-400 shrink-0" />
+            <a
+              href="https://github.com/jusafing/ThreatFeeds-Lite"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="ThreatFeeds Lite on GitHub"
+              className="text-brand-400 hover:text-brand-300 shrink-0"
+            >
+              <Github className="w-4 h-4" />
+            </a>
             <dt className="text-sm text-gray-400 w-32">Code Dev Team</dt>
             <dd className="text-sm text-gray-200">
-              Javier Santillan{' '}
               <a
-                href="mailto:jusafing@jusanet.org"
-                className="text-gray-500 hover:text-gray-300"
+                href="https://github.com/jusafing"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-gray-200 hover:text-brand-300"
               >
-                jusafing@jusanet.org
+                Javier Santillan
               </a>
             </dd>
           </div>

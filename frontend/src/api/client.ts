@@ -422,6 +422,11 @@ export const api = {
   getSummary: (opts: { includeActive?: boolean } = {}) =>
     request<SummaryItem[]>(`/viewer/summary${opts.includeActive ? '?include_active=true' : ''}`),
 
+  // issue_local_009: field names seen populated by ingestion, most-relevant
+  // first. Used by the Raw Feeds table to pick its default visible columns.
+  getFieldPresence: () =>
+    request<{ fields: string[] }>('/viewer/field-presence').then(r => r.fields),
+
   // Fields
   getFields: () => request<FieldsConfig>('/fields'),
   toggleCoreField: (name: string, enabled: boolean) =>

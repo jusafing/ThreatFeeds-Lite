@@ -59,6 +59,44 @@ _FILTERABLE_EXTRA_COLUMNS: frozenset[str] = frozenset({"id", "dedup_key"})
 FILTERABLE_COLUMNS: frozenset[str] = CORE_COLUMNS | _FILTERABLE_EXTRA_COLUMNS
 
 
+# issue_local_009: in-memory tally of which entry fields were seen populated by
+# newly-inserted rows since the last flush. Updated on the hot insert path with
+# ZERO I/O; drained and persisted to data/meta.db once per ingest job (see
+# backend.ingestion.jobs). Fields that are internal/noisy or always-shown are
+# excluded so they never compete for a default-visible slot in the Raw table.
+_FIELD_PRESENCE_IGNORE: frozenset[str] = frozenset({
+    "id", "dedup_key", "normalized", "extra", "raw", "source", "ingested_at",
+})
+_field_presence_pending: dict[str, int] = {}
+
+
+def _note_inserted_fields(entry: dict[str, Any]) -> None:
+    """Record (in memory) which fields a just-inserted entry populated.
+
+    A field counts as populated when its value is neither ``None`` nor an empty
+    string. Cheap and side-effect-free apart from mutating the module-level
+    pending tally; persistence happens later via ``drain_field_presence``.
+    """
+    for key, value in entry.items():
+        if key in _FIELD_PRESENCE_IGNORE:
+            continue
+        if value is None or value == "":
+            continue
+        _field_presence_pending[key] = _field_presence_pending.get(key, 0) + 1
+
+
+def drain_field_presence() -> dict[str, int]:
+    """Return and clear the pending field-population tally.
+
+    Called by the ingest-job completion hook to flush counts to meta.db. Safe
+    to call when empty (returns an empty dict).
+    """
+    global _field_presence_pending
+    drained = _field_presence_pending
+    _field_presence_pending = {}
+    return drained
+
+
 
 def _db_path(source_name: str) -> Path:
     DATA_DIR.mkdir(exist_ok=True)
@@ -215,6 +253,10 @@ async def insert_entry(source_name: str, entry: dict[str, Any]) -> InsertResult:
             await db.commit()
             changed = cursor.rowcount > 0
             await cursor.close()
+            if changed:
+                # Track populated fields for the Raw-table default columns.
+                # In-memory only; flushed to meta.db per ingest job.
+                _note_inserted_fields(entry)
             return "inserted" if changed else "duplicate"
     except sqlite3.IntegrityError:
         return "duplicate"

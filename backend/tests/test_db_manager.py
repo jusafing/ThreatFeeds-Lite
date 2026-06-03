@@ -353,3 +353,45 @@ async def test_query_entries_unknown_field_filter_is_ignored(temp_data_dir):
     )
     assert len(rows) == 1
     assert rows[0]["indicator"] == "3.3.3.3"
+
+
+# ── field-presence tracking (issue_local_009) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_insert_tracks_populated_fields(temp_data_dir):
+    """insert_entry records non-empty field names (excluding internal/always-
+    shown columns) into the in-memory tally, drained for meta.db persistence."""
+    from backend.db import manager
+
+    manager.drain_field_presence()  # clear any prior state
+    await manager.insert_entry("fp_src", {
+        "indicator": "9.9.9.9", "indicator_type": "ip", "severity": "high",
+        "source": "fp_src", "title": "", "actor": None,
+    })
+    deltas = manager.drain_field_presence()
+
+    assert deltas.get("indicator") == 1
+    assert deltas.get("indicator_type") == 1
+    assert deltas.get("severity") == 1
+    # Empty/None values are not counted.
+    assert "title" not in deltas
+    assert "actor" not in deltas
+    # Internal/always-shown columns are excluded.
+    assert "source" not in deltas
+    assert "ingested_at" not in deltas
+    assert "extra" not in deltas
+    # Drain clears the tally.
+    assert manager.drain_field_presence() == {}
+
+
+@pytest.mark.asyncio
+async def test_duplicate_insert_does_not_track_fields(temp_data_dir):
+    """A duplicate (no-op) insert must not bump the field-presence tally."""
+    from backend.db import manager
+
+    row = {"indicator": "1.1.1.1", "source": "fp_dup", "published_at": "2024-01-01"}
+    assert await manager.insert_entry("fp_dup", row) == "inserted"
+    manager.drain_field_presence()  # clear the first insert's counts
+    assert await manager.insert_entry("fp_dup", row) == "duplicate"
+    assert manager.drain_field_presence() == {}
