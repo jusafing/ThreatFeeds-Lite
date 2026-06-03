@@ -43,28 +43,6 @@ CREATE TABLE IF NOT EXISTS source_meta (
 )
 """
 
-# issue_local_009: persistent registry of which entry fields have been seen
-# populated by ingestion. The Raw Feeds table uses this to pick its default
-# visible columns (fields that actually have content) without scanning entries
-# on every refresh. ``populated_count`` accumulates the number of inserted rows
-# that carried a non-empty value for the field; ``last_populated_at`` records
-# the most recent time it was seen, so defaults favour recently-active fields.
-_CREATE_FIELD_PRESENCE = """
-CREATE TABLE IF NOT EXISTS field_presence (
-    field             TEXT PRIMARY KEY,
-    populated_count   INTEGER NOT NULL DEFAULT 0,
-    last_populated_at TEXT
-)
-"""
-
-_UPSERT_FIELD_PRESENCE = """
-INSERT INTO field_presence (field, populated_count, last_populated_at)
-VALUES (?, ?, ?)
-ON CONFLICT(field) DO UPDATE SET
-    populated_count   = field_presence.populated_count + excluded.populated_count,
-    last_populated_at = excluded.last_populated_at
-"""
-
 _UPSERT = """
 INSERT INTO source_meta (
     source, last_ingested_at, last_total_read, last_inserted,
@@ -85,7 +63,6 @@ async def _ensure_schema() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     async with aiosqlite.connect(META_DB) as db:
         await db.execute(_CREATE_TABLE)
-        await db.execute(_CREATE_FIELD_PRESENCE)
         await db.commit()
 
 
@@ -148,51 +125,3 @@ async def reset_meta() -> None:
     """Test helper — wipe the meta DB."""
     if META_DB.exists():
         META_DB.unlink()
-
-
-async def record_field_presence(
-    deltas: dict[str, int],
-    when: datetime | None = None,
-) -> None:
-    """Accumulate field-population counts into ``field_presence``.
-
-    ``deltas`` maps a field name to the number of newly-inserted rows (since the
-    last flush) that carried a non-empty value for it. Called once per ingest
-    job from the job-completion hook — never per row — so the write cost is
-    bounded by the number of distinct fields, not the number of entries.
-    """
-    if not deltas:
-        return
-    await _ensure_schema()
-    ts = (when or datetime.now(timezone.utc)).isoformat()
-    rows = [(field, int(count), ts) for field, count in deltas.items() if count]
-    if not rows:
-        return
-    try:
-        async with aiosqlite.connect(META_DB) as db:
-            await db.executemany(_UPSERT_FIELD_PRESENCE, rows)
-            await db.commit()
-    except sqlite3.OperationalError as exc:
-        logger.warning("meta.record_field_presence failed: %s", exc)
-
-
-async def get_field_presence() -> list[str]:
-    """Return field names that have been seen populated, most-relevant first.
-
-    Ordered by recency (``last_populated_at`` DESC) then frequency
-    (``populated_count`` DESC) so the Raw Feeds table can pick its default
-    visible columns from fields that actually carry content.
-    """
-    if not META_DB.exists():
-        return []
-    try:
-        async with aiosqlite.connect(META_DB) as db:
-            cur = await db.execute(
-                "SELECT field FROM field_presence WHERE populated_count > 0 "
-                "ORDER BY last_populated_at DESC, populated_count DESC, field ASC"
-            )
-            rows = await cur.fetchall()
-            return [r[0] for r in rows]
-    except sqlite3.OperationalError as exc:
-        logger.warning("meta.get_field_presence failed: %s", exc)
-        return []

@@ -1,22 +1,25 @@
-"""Tests for GET /api/viewer/field-presence (issue_local_009)."""
+"""Tests for GET /api/viewer/field-presence (issue_local_009, review_01).
+
+The endpoint derives the Raw-table default columns on demand from the most
+recent entries, so these tests seed entries via insert_entry and assert the
+endpoint surfaces their populated fields.
+"""
 from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.main import app
-from backend.db import meta as meta_mod
+from backend.db.manager import insert_entry
 
 
 @pytest.fixture
-def isolated_meta(tmp_path, monkeypatch):
-    fake_path = tmp_path / "meta.db"
-    monkeypatch.setattr(meta_mod, "META_DB", fake_path)
-    monkeypatch.setattr(meta_mod, "DATA_DIR", tmp_path)
-    return fake_path
+def temp_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr("backend.db.manager.DATA_DIR", tmp_path)
+    return tmp_path
 
 
-def test_field_presence_empty(isolated_meta):
+def test_field_presence_empty(temp_data_dir):
     with TestClient(app) as client:
         resp = client.get("/api/viewer/field-presence")
     assert resp.status_code == 200
@@ -24,20 +27,20 @@ def test_field_presence_empty(isolated_meta):
 
 
 @pytest.mark.asyncio
-async def test_field_presence_returns_ranked_fields(isolated_meta):
-    from datetime import datetime, timezone
-
-    await meta_mod.record_field_presence(
-        {"cve_id": 5, "actor": 2}, when=datetime(2025, 1, 1, tzinfo=timezone.utc)
-    )
-    await meta_mod.record_field_presence(
-        {"actor": 1}, when=datetime(2025, 1, 2, tzinfo=timezone.utc)
-    )
+async def test_field_presence_derived_from_recent_entries(temp_data_dir):
+    await insert_entry("fp_src", {
+        "source": "fp_src", "indicator": "1.1.1.1", "indicator_type": "ip",
+        "cve_id": "CVE-2026-1", "title": "", "published_at": "2026-01-01",
+    })
 
     with TestClient(app) as client:
         resp = client.get("/api/viewer/field-presence")
     assert resp.status_code == 200
     fields = resp.json()["fields"]
-    # Most-recently populated first.
-    assert fields[0] == "actor"
-    assert set(fields) == {"actor", "cve_id"}
+    assert "cve_id" in fields
+    assert "indicator" in fields
+    assert "indicator_type" in fields
+    # Empty / internal / always-shown columns excluded.
+    assert "title" not in fields
+    assert "source" not in fields
+    assert "ingested_at" not in fields

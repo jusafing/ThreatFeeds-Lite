@@ -35,13 +35,13 @@ describe('About page (prompts-051)', () => {
     expect(screen.getByText('ThreatFeeds Lite')).toBeInTheDocument()
   })
 
-  it('credits the code dev team with GitHub links', () => {
+  it('credits the code dev team with a GitHub repo link next to the name', () => {
     renderAbout()
     expect(screen.getByText('Code Dev Team')).toBeInTheDocument()
-    // Author name links to the GitHub profile.
-    const author = screen.getByRole('link', { name: 'Javier Santillan' })
-    expect(author).toHaveAttribute('href', 'https://github.com/jusafing')
-    // The GitHub icon links to the repository.
+    // Name is plain text (no longer a link).
+    expect(screen.getByText('Javier Santillan')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Javier Santillan' })).toBeNull()
+    // The GitHub icon next to the name links to the repository.
     const repo = screen.getByRole('link', { name: 'ThreatFeeds Lite on GitHub' })
     expect(repo).toHaveAttribute('href', 'https://github.com/jusafing/ThreatFeeds-Lite')
   })

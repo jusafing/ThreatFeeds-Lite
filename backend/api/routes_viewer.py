@@ -7,8 +7,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Query
 
-from backend.db.manager import get_summary, query_entries
-from backend.db.meta import get_field_presence
+from backend.db.manager import get_recently_populated_fields, get_summary, query_entries
 from backend.ingestion.jobs import job_store
 
 router = APIRouter(prefix="/api/viewer", tags=["viewer"])
@@ -92,10 +91,12 @@ async def get_summary_endpoint(
 
 @router.get("/field-presence")
 async def get_field_presence_endpoint() -> dict:
-    """Return entry field names seen populated by ingestion, most-relevant first.
+    """Return entry field names that carry content in the most recent entries.
 
-    issue_local_009: the Raw Feeds table uses this to pick its default visible
-    columns (fields that actually carry content) instead of scanning entries on
-    every refresh.
+    issue_local_009 (review_01): the Raw Feeds table calls this when it opens to
+    pick its default visible columns from fields that actually have data in the
+    last ingested entries (across all feeds). Derived on demand so ingestion is
+    never burdened with tracking, and the result always reflects the latest
+    ingested data.
     """
-    return {"fields": await get_field_presence()}
+    return {"fields": await get_recently_populated_fields()}

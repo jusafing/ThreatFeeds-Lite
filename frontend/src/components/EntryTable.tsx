@@ -113,8 +113,9 @@ export default function EntryTable() {
     .filter(r => r.source !== '__total__')
     .map(r => r.source)
 
-  // issue_local_009: ranked field names (most-relevant first) that ingestion
-  // has seen populated. Drives the default visible columns.
+  // issue_local_009: field names that carry content in the most recent entries,
+  // derived server-side on demand when this table opens. Drives the default
+  // visible columns so they reflect the latest ingested data of any feed.
   const { data: presenceFields } = useQuery<string[]>({
     queryKey: ['field-presence'],
     queryFn: () => api.getFieldPresence(),

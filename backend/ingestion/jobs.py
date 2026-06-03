@@ -177,16 +177,6 @@ class JobStore:
                 kind=job.kind,
             )
         )
-        # issue_local_009: flush the in-memory field-population tally accumulated
-        # by insert_entry during this job to data/meta.db (one batched write).
-        try:
-            from backend.db import manager  # noqa: WPS433 (lazy import is intentional)
-
-            deltas = manager.drain_field_presence()
-        except Exception:  # pragma: no cover — defensive
-            deltas = {}
-        if deltas:
-            loop.create_task(meta.record_field_presence(deltas))
 
     # ── Smart-mode trigger (021E-3) ──────────────────────────────────────────
 

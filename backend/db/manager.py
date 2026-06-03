@@ -59,42 +59,12 @@ _FILTERABLE_EXTRA_COLUMNS: frozenset[str] = frozenset({"id", "dedup_key"})
 FILTERABLE_COLUMNS: frozenset[str] = CORE_COLUMNS | _FILTERABLE_EXTRA_COLUMNS
 
 
-# issue_local_009: in-memory tally of which entry fields were seen populated by
-# newly-inserted rows since the last flush. Updated on the hot insert path with
-# ZERO I/O; drained and persisted to data/meta.db once per ingest job (see
-# backend.ingestion.jobs). Fields that are internal/noisy or always-shown are
-# excluded so they never compete for a default-visible slot in the Raw table.
+# issue_local_009 (review_01): fields excluded from the Raw-table default-column
+# derivation. Internal/ID/blob columns carry no display value, and source +
+# ingested_at are always shown by the table so they never compete for a slot.
 _FIELD_PRESENCE_IGNORE: frozenset[str] = frozenset({
     "id", "dedup_key", "normalized", "extra", "raw", "source", "ingested_at",
 })
-_field_presence_pending: dict[str, int] = {}
-
-
-def _note_inserted_fields(entry: dict[str, Any]) -> None:
-    """Record (in memory) which fields a just-inserted entry populated.
-
-    A field counts as populated when its value is neither ``None`` nor an empty
-    string. Cheap and side-effect-free apart from mutating the module-level
-    pending tally; persistence happens later via ``drain_field_presence``.
-    """
-    for key, value in entry.items():
-        if key in _FIELD_PRESENCE_IGNORE:
-            continue
-        if value is None or value == "":
-            continue
-        _field_presence_pending[key] = _field_presence_pending.get(key, 0) + 1
-
-
-def drain_field_presence() -> dict[str, int]:
-    """Return and clear the pending field-population tally.
-
-    Called by the ingest-job completion hook to flush counts to meta.db. Safe
-    to call when empty (returns an empty dict).
-    """
-    global _field_presence_pending
-    drained = _field_presence_pending
-    _field_presence_pending = {}
-    return drained
 
 
 
@@ -253,10 +223,6 @@ async def insert_entry(source_name: str, entry: dict[str, Any]) -> InsertResult:
             await db.commit()
             changed = cursor.rowcount > 0
             await cursor.close()
-            if changed:
-                # Track populated fields for the Raw-table default columns.
-                # In-memory only; flushed to meta.db per ingest job.
-                _note_inserted_fields(entry)
             return "inserted" if changed else "duplicate"
     except sqlite3.IntegrityError:
         return "duplicate"
@@ -323,6 +289,31 @@ async def query_entries(
 
     results.sort(key=lambda r: r.get("ingested_at", ""), reverse=True)
     return results[:limit]
+
+
+async def get_recently_populated_fields(limit: int = 100) -> list[str]:
+    """Return entry field names that carry content in the most recent entries.
+
+    issue_local_009 (review_01): the Raw Feeds table calls this when it is
+    opened to pick its default visible columns from fields that actually have
+    data in the last ``limit`` ingested entries (across all feeds), rather than
+    a static list. Derived on demand so ingestion is never burdened with
+    tracking, and always reflects the latest ingested data.
+
+    Fields are ranked by how many of the recent entries populate them (desc),
+    then alphabetically. Internal/blob columns and the always-shown
+    ``source``/``ingested_at`` are excluded.
+    """
+    rows = await query_entries(limit=limit)
+    counts: dict[str, int] = {}
+    for row in rows:
+        for key, value in row.items():
+            if key in _FIELD_PRESENCE_IGNORE:
+                continue
+            if value is None or value == "":
+                continue
+            counts[key] = counts.get(key, 0) + 1
+    return sorted(counts, key=lambda k: (-counts[k], k))
 
 
 async def get_summary() -> list[dict[str, Any]]:
