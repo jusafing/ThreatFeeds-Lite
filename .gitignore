@@ -61,6 +61,8 @@ pnpm-debug.log*
 # ──────────────────────────────────────────
 dist/
 build/
+# Keep the Docker build sources (not a build-output dir).
+!docker/build/
 
 # ──────────────────────────────────────────
 # Application data (SQLite databases)

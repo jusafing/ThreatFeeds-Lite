@@ -1,0 +1,33 @@
+# ThreatFeeds Lite — local container.
+#
+# Uses the locally-built image `threatfeeds-lite/local` (build it first with
+# docker/build/build.sh). The image is a minimal system that ships the cloned
+# app; the app's own startup script installs dependencies and builds the
+# frontend on the FIRST start, then runs uvicorn in the foreground.
+#
+#   docker compose up -d
+#   docker compose logs -f      # first-run admin password is printed here
+#   docker compose down
+#
+services:
+  threatfeeds-lite:
+    image: threatfeeds-lite/local
+    container_name: threatfeeds-lite
+    restart: unless-stopped
+    # Reap child processes (npm/node) so PID 1 stays clean.
+    init: true
+    # Start the app ONLY through its own startup script. `--dev` keeps uvicorn in
+    # the foreground (so the container stays up); `--enable-auth` turns on login;
+    # `--bind 0.0.0.0:8000` listens on all interfaces. On the first start the
+    # script installs dependencies and builds the frontend (needs internet), then
+    # bootstraps an "admin" account whose generated password is printed to
+    # `docker compose logs threatfeeds-lite` and written to
+    # data/first-run-admin-credentials.txt (mode 0600). See README.
+    command: ["./threatfeeds-lite", "start", "--dev", "--enable-auth", "--bind", "0.0.0.0:8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      # SQLite databases + first-run admin credential file -> host directory.
+      - ./threatfeeds-data:/home/threatfeeds/data
+      # Application logs (app.log / audit.log) -> host directory.
+      - ./threatfeeds-logs:/home/threatfeeds/logs
