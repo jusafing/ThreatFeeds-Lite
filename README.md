@@ -243,6 +243,115 @@ To push into an **explicitly-named** feed instead, POST to
 
 ---
 
+## Watchers
+
+A **Watcher** is a user-defined saved filter that continuously evaluates
+ingested events and publishes the matches to a **public per-watcher feed URL**
+(and, optionally, pushes them to a webhook). Use watchers to carve a focused
+syndication feed out of the firehose — e.g. *"critical CVEs affecting nginx"* or
+*"anything tagged ransomware from feedA"* — that downstream tools can poll
+without touching the admin API.
+
+Watchers are managed from the admin-only **Watchers** page (Summary / Config /
+Activity tabs) and the admin-gated `/api/watchers/*` API. Definitions and
+triggered-event history live in a dedicated `data/watchers.db`, kept separate
+from `normalized.db` so they survive normalized-schema rebuilds.
+
+### How matching works
+
+Each watcher has one or more **conditions**, AND-combined. A condition is a
+`field` + `value` plus a `match_type`:
+
+| `match_type` | Matches when… |
+|---|---|
+| `exact` | field equals value |
+| `contains` | value is a substring of the field |
+| `wildcard` | field matches a `*`/`?` glob |
+| `regex` | field matches the regular expression |
+| `gte` / `lte` | numeric field is ≥ / ≤ a numeric value |
+
+- Leave `field` empty (or `*`/`all`/`any`) to match the value against **any**
+  field. `case_sensitive` (default off) applies to `exact`, `wildcard`, and
+  `contains`.
+- **Scope** is set per watcher: `dataset` (`all`, `raw`, or `normalized`) and
+  `feeds` (a list of source names; empty = all feeds).
+- `severity` (`low`/`medium`/`high`/`critical`) is a **classification label
+  only** — it does not gate matching.
+
+### Evaluation modes
+
+| `mode` | When it evaluates |
+|---|---|
+| `realtime` | Automatically when an ingestion or normalizer run completes. |
+| `scheduled` | On a fixed timer every `interval_sec` seconds (min 5). |
+
+Each watcher tracks per-source high-water marks, so only **new** events are
+considered on each pass. You can also press **Trigger** in the UI (or
+`POST /api/watchers/{id}/trigger`) to evaluate immediately — this works even on
+a disabled watcher.
+
+### Public feed
+
+Matched events are published at an **unauthenticated** syndication URL (it lives
+outside `/api/`, so the auth layer does not guard it):
+
+```bash
+# JSON (default); also CSV and XML/RSS via the watcher's `format`
+curl http://127.0.0.1:8000/feed/watcher/<watcher-id>/
+```
+
+The `<watcher-id>` is a slug derived from the watcher name. The feed serves the
+most recent matches, capped by the watcher's `max_feed_events` (and the global
+`watcher_max_events` ceiling, below).
+
+### Webhook / HTTP delivery (optional)
+
+Set `publish_target` to `webhook` or `http` to also **push** each match to an
+external endpoint. The payload is shaped by `webhook_format`:
+
+| `webhook_format` | Target |
+|---|---|
+| `generic` | Plain JSON POST |
+| `discord` | Discord webhook |
+| `slack` | Slack incoming webhook |
+| `teams` | Microsoft Teams connector |
+
+The format is auto-detected from the webhook URL host (and overridable). An
+optional `auth_header` / `auth_value` pair attaches a custom auth header.
+Delivery is per-event best-effort with automatic retries; failures are surfaced
+in the **Activity** tab with the last error detail for inspection.
+
+> **Admin-only by design.** Watcher webhook URLs are admin-configured and may
+> target internal hosts, so all `/api/watchers/*` routes are restricted to
+> `admin` accounts. Do not expose watcher configuration to non-admin roles.
+
+### Retention
+
+- **Per watcher:** `max_feed_events` bounds how many matches the feed keeps; a
+  periodic cleanup job trims the stored feed every `cleanup_interval_sec`
+  seconds (10–86400).
+- **Global ceiling:** `watcher_max_events` in `config/application.yaml` caps
+  retention across every watcher (default **1000**, range **10–100000**). It is
+  editable from the UI or via `GET`/`POST /api/app/watcher-max-events`.
+
+---
+
+## Viewer & Normalization UI
+
+Beyond the API and watchers, the web UI exposes the core day-to-day surfaces:
+
+- **Viewer** — browse the **Raw** and **Normalized** event tables side by side,
+  with a configurable column picker, full-text search, and a natural-language
+  (LLM) query box. Raw and normalized are independent stores (see
+  [Raw vs normalized](#get-normalized--normalized-events)).
+- **Normalizer** — run and monitor the LLM-powered normalization engine, and
+  review per-run history (counts, status, timing).
+- **Smart Mappings** — an admin workspace for LLM-assisted field-mapping
+  suggestions, with manual overrides that feed the canonical schema (see
+  [Canonical schema reconciliation](#canonical-schema-reconciliation)).
+
+---
+
 ## API Client Script
 
 `scripts/api_client.py` is a standalone, dependency-free (Python standard library
@@ -571,6 +680,7 @@ backend/                    # Python / FastAPI backend
   requirements.txt          # Python dependencies
 frontend/                   # React / TypeScript frontend
 data/                       # SQLite databases (auto-created, gitignored)
+  watchers.db               # Watcher definitions + triggered-event history
 docs/                       # Architecture, plans, session log
 scripts/                    # check.sh, test.sh, security-check.sh, api_client.py
 ```
